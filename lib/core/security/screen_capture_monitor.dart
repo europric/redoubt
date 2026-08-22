@@ -4,11 +4,21 @@
 /// (`UIScreen.capturedDidChangeNotification` + the initial
 /// `UIScreen.main.isCaptured`, and `UIApplication.userDidTakeScreenshotNotification`).
 ///
+/// **Shared-session architecture**: [PlatformScreenCaptureMonitor] multiplexes
+/// all concurrent [isCaptured] and [screenshots] subscriptions over one shared,
+/// refcounted native listen/cancel session per process. An internal
+/// `_CaptureSession` singleton owns the single `EventChannel` registration, a
+/// broadcast event controller, and a serialized async queue for native
+/// listen/cancel operations. This prevents the crash caused by a
+/// `PlatformException("No active stream to cancel")` when two `SecureScreen`
+/// widgets mount/unmount concurrently, and ensures both streams receive events
+/// without one subscription's handler overwriting the other's.
+///
 /// Android has no native handler for this channel -- `FLAG_SECURE` already
 /// blocks the capture outright (see `screen_protection.dart`), so there is
 /// nothing to react to. [PlatformScreenCaptureMonitor] degrades to silently
-/// empty streams there, and in tests with no mocked handler, mirroring
-/// [ScreenProtection]'s existing `MissingPluginException` convention.
+/// empty streams there, closing permanently after the first
+/// [MissingPluginException] (never retrying native `listen` on later mounts).
 ///
 /// **Decision-gate outcome (design.md D11 / tasks.md Phase 5.2)**: the
 /// primary layer-1 blocking technique (secure-overlay window reparenting via
@@ -26,6 +36,7 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Reactive iOS screen-capture signals. See library doc comment for the
@@ -40,67 +51,248 @@ abstract interface class ScreenCaptureMonitor {
 }
 
 /// [EventChannel]-backed adapter over `vault/capture`.
+///
+/// All subscriptions share one internal [PlatformScreenCaptureMonitor._CaptureSession]
+/// session. See library doc comment for details.
 class PlatformScreenCaptureMonitor implements ScreenCaptureMonitor {
+  const PlatformScreenCaptureMonitor();
+
+  @override
+  Stream<bool> get isCaptured => Stream<bool>.multi((out) {
+        final session = _CaptureSession.instance;
+        final source = session.acquire();
+        var released = false;
+
+        void release() {
+          if (!released) {
+            released = true;
+            session.release();
+          }
+        }
+
+        // Replay cached isCaptured value immediately, if one exists.
+        final cached = session.lastIsCaptured;
+        if (cached != null) {
+          out.add(cached);
+        }
+
+        final sub = source
+            .where((e) => e['type'] == 'isCaptured')
+            .map((e) => e['value']! as bool)
+            .listen(
+              out.add,
+              onError: out.addError,
+              onDone: () {
+                release();
+                out.close();
+              },
+            );
+
+        out.onCancel = () {
+          release();
+          return sub.cancel();
+        };
+      });
+
+  @override
+  Stream<void> get screenshots => Stream<void>.multi((out) {
+        final session = _CaptureSession.instance;
+        final source = session.acquire();
+        var released = false;
+
+        void release() {
+          if (!released) {
+            released = true;
+            session.release();
+          }
+        }
+
+        final sub = source
+            .where((e) => e['type'] == 'screenshot')
+            .listen(
+              (_) => out.add(null),
+              onError: out.addError,
+              onDone: () {
+                release();
+                out.close();
+              },
+            );
+
+        out.onCancel = () {
+          release();
+          return sub.cancel();
+        };
+      });
+
+  /// Resets the shared [_CaptureSession] singleton. For test isolation only.
+  @visibleForTesting
+  static void debugReset() => _CaptureSession.debugReset();
+}
+
+/// Process-level singleton that owns the single [EventChannel] registration,
+/// one [StreamController.broadcast] of decoded native events, a subscriber
+/// refcount, the last-known `isCaptured` value, an Android terminal latch,
+/// and a serialized async queue guaranteeing ordered native listen/cancel.
+///
+/// Multiple [Stream.multi] views ([isCaptured], [screenshots]) each call
+/// [acquire] on subscription and [release] on unsubscribe, sharing one native
+/// session as long as any subscriber is active.
+class _CaptureSession {
+  _CaptureSession._();
+
+  /// The process-wide singleton. Used by [PlatformScreenCaptureMonitor]'s
+  /// [Stream.multi] views.
+  static final _CaptureSession instance = _CaptureSession._();
+
+  // --- State ---
+
+  int _refs = 0;
+  bool _open = false;
+
+  /// Set by [_openIfNeeded] when [MissingPluginException] is caught. Once set,
+  /// no further native listen attempts occur for the process lifetime.
+  bool _terminal = false;
+
+  /// Cached last-known isCaptured value, for late-subscriber replay.
+  /// Updated in the message handler BEFORE the event is dispatched.
+  bool? _lastIsCaptured;
+
+  /// Exposed for replay in [Stream.multi] views.
+  bool? get lastIsCaptured => _lastIsCaptured;
+
+  /// The single broadcast controller for decoded native events.
+  StreamController<Map<Object?, Object?>>? _controller;
+
+  /// Serialized async queue: every native operation is a link in this
+  /// [Future] chain, so overlapping [acquire]/[release] calls never race.
+  Future<void> _queue = Future<void>.value();
+
+  // --- Channels ---
+
+  final MethodChannel _method = const MethodChannel(_name, _codec);
   static const String _name = 'vault/capture';
   static const MethodCodec _codec = StandardMethodCodec();
   static const EventChannel _channel = EventChannel(_name, _codec);
 
-  const PlatformScreenCaptureMonitor();
+  // --- Public API for Stream.multi views ---
 
-  @override
-  Stream<bool> get isCaptured => _events()
-      .where((event) => event['type'] == 'isCaptured')
-      .map((event) => event['value'] as bool);
+  /// Adds one reference and returns the shared broadcast stream.
+  /// Defers [_openIfNeeded] via the serialized queue when the session is not
+  /// yet open.
+  ///
+  /// When the session is terminal ([MissingPluginException] already caught),
+  /// returns an immediately-done stream without creating a controller.
+  Stream<Map<Object?, Object?>> acquire() {
+    _refs++;
+    if (_terminal) {
+      return const Stream<Map<Object?, Object?>>.empty();
+    }
+    final c = _controller ??= StreamController<Map<Object?, Object?>>.broadcast();
+    _enqueue(_openIfNeeded);
+    return c.stream;
+  }
 
-  @override
-  Stream<void> get screenshots =>
-      _events().where((event) => event['type'] == 'screenshot').map((_) {});
+  /// Removes one reference. Defers [_teardownIfIdle] via the serialized queue
+  /// when the refcount reaches zero.
+  ///
+  /// **Idempotent**: safe to call multiple times per listener (e.g. when both
+  /// `onDone` and `onCancel` fire).
+  void release() {
+    if (_refs > 0) _refs--;
+    _enqueue(_teardownIfIdle);
+  }
 
-  /// Hand-rolled equivalent of [EventChannel.receiveBroadcastStream] that
-  /// catches [MissingPluginException] from the initial `listen` call
-  /// ourselves. The stock implementation swallows that exception internally
-  /// via `FlutterError.reportError` and leaves the stream open forever
-  /// without ever emitting or closing -- correct for a production app, but
-  /// untestable with a terminating assertion and noisy in `flutter test`.
-  /// Catching it here instead closes the stream deterministically, which is
-  /// the same "silently do nothing" outcome from the caller's point of view.
-  Stream<Map<Object?, Object?>> _events() {
-    late StreamController<Map<Object?, Object?>> controller;
-    const methodChannel = MethodChannel(_name, _codec);
-    controller = StreamController<Map<Object?, Object?>>.broadcast(
-      onListen: () async {
-        _channel.binaryMessenger.setMessageHandler(_name, (reply) async {
-          if (reply == null) {
-            await controller.close();
-            return null;
-          }
-          try {
-            final decoded = _codec.decodeEnvelope(reply);
-            if (decoded is Map) {
-              controller.add(decoded.cast<Object?, Object?>());
-            }
-          } on PlatformException catch (error, stackTrace) {
-            controller.addError(error, stackTrace);
-          }
-          return null;
-        });
-        try {
-          await methodChannel.invokeMethod<void>('listen');
-        } on MissingPluginException {
-          // No native handler for this channel (Android, unmocked tests) --
-          // expected, not an error. Degrade to a closed, empty stream.
-          await controller.close();
+  // --- Queue ---
+
+  /// Appends [step] to the serialized queue. Each step re-reads mutable state
+  /// at execution time, so a churn from 1→0→1 collapses into a no-op.
+  void _enqueue(Future<void> Function() step) {
+    _queue = _queue.then((_) => step());
+  }
+
+  // --- Native listen ---
+
+  /// Registers the message handler on the [EventChannel]'s binary messenger
+  /// and invokes native `listen`, unless already open or terminal.
+  Future<void> _openIfNeeded() async {
+    if (_open || _terminal) return;
+
+    _open = true;
+    _channel.binaryMessenger.setMessageHandler(_name, _handleNativeEvent);
+
+    try {
+      await _method.invokeMethod<void>('listen');
+    } on MissingPluginException {
+      // No native handler (Android, unmocked test) — terminal, never retry.
+      _terminal = true;
+      _channel.binaryMessenger.setMessageHandler(_name, null);
+      final c = _controller;
+      _controller = null; // prevent double-close from _teardownIfIdle
+      await c?.close();
+    }
+  }
+
+  /// Decodes a native envelope and dispatches to the broadcast controller.
+  /// Updates [_lastIsCaptured] before dispatching so late‑subscriber replay
+  /// sees the latest value.
+  Future<ByteData?> _handleNativeEvent(ByteData? reply) async {
+    if (reply == null) {
+      await _controller?.close();
+      return null;
+    }
+    try {
+      final decoded = _codec.decodeEnvelope(reply);
+      if (decoded is Map) {
+        final typed = decoded.cast<Object?, Object?>();
+        // Cache isCaptured value before dispatching.
+        if (typed['type'] == 'isCaptured') {
+          _lastIsCaptured = typed['value'] as bool?;
         }
-      },
-      onCancel: () async {
-        _channel.binaryMessenger.setMessageHandler(_name, null);
-        try {
-          await methodChannel.invokeMethod<void>('cancel');
-        } on MissingPluginException {
-          // Already gone -- nothing to cancel.
-        }
-      },
-    );
-    return controller.stream;
+        _controller?.add(typed);
+      }
+    } on PlatformException catch (error, stackTrace) {
+      _controller?.addError(error, stackTrace);
+    }
+    return null;
+  }
+
+  // --- Native cancel ---
+
+  /// Tears down when refcount is zero: clears the message handler, invokes
+  /// native `cancel`, clears the cached value, and closes the controller.
+  /// [PlatformException] from cancel is silently swallowed (unactionable with
+  /// no subscriber left).
+  Future<void> _teardownIfIdle() async {
+    if (_refs > 0 || !_open) return;
+
+    final c = _controller;
+    _controller = null;
+    _open = false;
+    _channel.binaryMessenger.setMessageHandler(_name, null);
+
+    try {
+      await _method.invokeMethod<void>('cancel');
+    } on MissingPluginException {
+      // Already gone — nothing to cancel.
+    } on PlatformException {
+      // "No active stream to cancel" from concurrent churn is benign.
+    }
+
+    _lastIsCaptured = null;
+    await c?.close();
+  }
+
+  // --- Test isolation ---
+
+  @visibleForTesting
+  static void debugReset() {
+    final s = instance;
+    s._refs = 0;
+    s._queue = Future<void>.value();
+    s._open = false;
+    s._terminal = false;
+    s._lastIsCaptured = null;
+    s._controller = null;
+    _channel.binaryMessenger.setMessageHandler(_name, null);
   }
 }
