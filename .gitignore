@@ -33,6 +33,7 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 custom_lint.log
+pubspec_overrides.yaml
 /build/
 /coverage/
 
