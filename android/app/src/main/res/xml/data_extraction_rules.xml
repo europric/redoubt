@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (API 31+) data extraction rules — `seed-exposure-protection`
+  spec's "Android Backup Exclusion" requirement (vault-secure-storage-
+  redesign PR7, task 8.6).
+
+  `android:allowBackup="false"` on the <application> element (see
+  AndroidManifest.xml) already disables cloud backup, device-to-device
+  transfer, and adb backup entirely — this file is deliberate
+  defense-in-depth: an exhaustive, explicit deny-all so that if a future
+  change ever flips `allowBackup` back to `true`, backup and device-transfer
+  extraction still exclude everything by default rather than silently
+  including the vault's secure storage. `disableIfNoEncryptionCapability`
+  is intentionally NOT set — this is deny-all regardless of encryption
+  capability.
+-->
+<data-extraction-rules>
+    <cloud-backup disableIfNoEncryptionCapability="false">
+        <exclude domain="root" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+    </device-transfer>
+</data-extraction-rules>
