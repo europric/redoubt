@@ -1,0 +1,89 @@
+name: Bump version
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: version-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute and apply version bump
+        id: bump
+        run: |
+          set -euo pipefail
+
+          CURRENT=$(grep -m1 '^version:' pubspec.yaml | sed 's/^version:[[:space:]]*//')
+          CURRENT_SEMVER="${CURRENT%%+*}"
+          CURRENT_BUILD="${CURRENT##*+}"
+
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tag — bootstrapping baseline tag v$CURRENT_SEMVER (no version change)."
+            git tag "v$CURRENT_SEMVER"
+            git push origin "v$CURRENT_SEMVER"
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BUMP="none"
+          while read -r sha; do
+            msg=$(git log -1 --pretty=%B "$sha")
+            subject=$(echo "$msg" | head -1)
+            if echo "$msg" | grep -q "BREAKING CHANGE:" || echo "$subject" | grep -qE '^[a-zA-Z]+(\(.+\))?!:'; then
+              BUMP="major"
+              break
+            elif echo "$subject" | grep -qE '^feat(\(.+\))?:' && [ "$BUMP" != "major" ]; then
+              BUMP="minor"
+            elif echo "$subject" | grep -qE '^fix(\(.+\))?:' && [ "$BUMP" = "none" ]; then
+              BUMP="patch"
+            fi
+          done < <(git log "$LAST_TAG"..HEAD --pretty=%H)
+
+          if [ "$BUMP" = "none" ]; then
+            echo "No feat/fix/breaking commits since $LAST_TAG — nothing to bump."
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_SEMVER"
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          NEW_BUILD=$((CURRENT_BUILD + 1))
+          NEW_SEMVER="$MAJOR.$MINOR.$PATCH"
+          NEW_VERSION="$NEW_SEMVER+$NEW_BUILD"
+
+          sed -i "s/^version:.*/version: $NEW_VERSION/" pubspec.yaml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pubspec.yaml
+          git commit -m "chore: release v$NEW_SEMVER [skip ci]"
+          git tag "v$NEW_SEMVER"
+          git push origin main
+          git push origin "v$NEW_SEMVER"
+
+          echo "bumped=true" >> "$GITHUB_OUTPUT"
+          echo "new_tag=v$NEW_SEMVER" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: steps.bump.outputs.bumped == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ steps.bump.outputs.new_tag }}" --generate-notes
