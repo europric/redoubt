@@ -1,9 +1,9 @@
 import 'dart:typed_data';
 
 import 'package:blockchain_utils/blockchain_utils.dart' hide Mnemonic;
-import 'package:unorm_dart/unorm_dart.dart' show nfkd;
 import 'package:redoubt/core/bip39/bip39.dart';
 import 'package:redoubt/core/eth/eth.dart';
+import 'package:unorm_dart/unorm_dart.dart' show nfkd;
 
 import '../domain/mnemonic.dart';
 import '../domain/mnemonic_service.dart';
