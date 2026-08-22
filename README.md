@@ -27,10 +27,12 @@ See [`pubspec.yaml`](pubspec.yaml) for the full, versioned dependency list.
 | `lib/features/` | One directory per user-facing feature: account, onboarding, seed, settings, signing, vault. |
 | `lib/core/` | Shared, feature-independent code: BIP-39, byte utilities, Ethereum primitives, BC-UR, forms, security, and shared presentation building blocks. |
 | `lib/config/` | App-wide configuration: dependency adapters and routing. |
-| `test/` | Unit and widget tests, mirroring the `lib/` layout. |
-| `integration_test/` | End-to-end and device-level tests (e.g. crypto benchmarks). |
-| `tool/wallet_lints/` | Custom lint rules enforced on this codebase. |
-| `design/redoubt-brand/` | Brand and design-token source (tokens, components, brand README). |
+| `tool/wallet_lints/` | Public no-op placeholder for the custom lint plugin — see below. |
+
+The test suite (`test/`, `integration_test/`), the real `tool/wallet_lints/`
+rules, and `design/redoubt-brand/` are kept in a private companion repo and
+are not present in this clone. CI overlays them at merge time to run the
+suite before a PR can land; see `.github/workflows/private-tests.yml`.
 
 ## Run / build / test
 
@@ -38,8 +40,8 @@ See [`pubspec.yaml`](pubspec.yaml) for the full, versioned dependency list.
 flutter pub get              # install dependencies
 flutter run                  # run on a connected device or simulator
 flutter build <platform>     # e.g. flutter build apk, flutter build ios
-flutter analyze              # static analysis, including custom wallet_lints rules
-flutter test                 # unit and widget tests
+flutter analyze              # static analysis (real wallet_lints rules run in CI only)
+flutter test                 # unit and widget tests (test/ is private, added by CI only)
 ```
 
 ## License
