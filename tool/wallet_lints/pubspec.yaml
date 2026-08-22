@@ -1,0 +1,15 @@
+name: wallet_lints
+description: >
+  Public placeholder for the wallet_lints custom_lint plugin. The real lint
+  rules live in the private redoubt-tests repo; CI overwrites this folder
+  with the real package before running analysis. Kept here only so `pub get`
+  resolves for anyone without access to the private repo.
+publish_to: 'none'
+version: 0.0.1
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+  analyzer: ^8.0.0
+  custom_lint_builder: ^0.8.0

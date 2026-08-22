@@ -1,0 +1,39 @@
+name: Trigger private tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  statuses: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    environment: Configure Tests
+    steps:
+      - name: Mark private tests as pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}" \
+            -f state=pending \
+            -f context=private-tests \
+            -f description="Running private test suite..."
+
+      - name: Dispatch to redoubt-tests (Gitea)
+        env:
+          TOKEN: ${{ secrets.GITEA_DISPATCH_TOKEN }}
+        run: |
+          curl -sSf -X POST \
+            -H "Authorization: token $TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://gitea.devnova.top/api/v1/repos/carfdev/redoubt-tests/actions/workflows/run-tests.yml/dispatches" \
+            -d '{
+              "ref": "main",
+              "inputs": {
+                "repo": "${{ github.repository }}",
+                "sha": "${{ github.event.pull_request.head.sha }}",
+                "pr_number": "${{ github.event.pull_request.number }}"
+              }
+            }'
