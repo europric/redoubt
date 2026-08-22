@@ -3,16 +3,21 @@ name: Bump version
 on:
   push:
     branches: [main]
+  pull_request:
+    types: [closed]
+    branches: [main]
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: version-bump
   cancel-in-progress: false
 
 jobs:
-  bump:
+  propose-release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,10 +25,16 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute and apply version bump
-        id: bump
+      - name: Compute bump and open release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          if gh pr list --state open --json headRefName --jq '.[].headRefName' | grep -q '^release/'; then
+            echo "A release PR is already open — skipping until it merges."
+            exit 0
+          fi
 
           CURRENT=$(grep -m1 '^version:' pubspec.yaml | sed 's/^version:[[:space:]]*//')
           CURRENT_SEMVER="${CURRENT%%+*}"
@@ -35,7 +46,6 @@ jobs:
             echo "No previous tag — bootstrapping baseline tag v$CURRENT_SEMVER (no version change)."
             git tag "v$CURRENT_SEMVER"
             git push origin "v$CURRENT_SEMVER"
-            echo "bumped=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -55,7 +65,6 @@ jobs:
 
           if [ "$BUMP" = "none" ]; then
             echo "No feat/fix/breaking commits since $LAST_TAG — nothing to bump."
-            echo "bumped=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -68,22 +77,39 @@ jobs:
           NEW_BUILD=$((CURRENT_BUILD + 1))
           NEW_SEMVER="$MAJOR.$MINOR.$PATCH"
           NEW_VERSION="$NEW_SEMVER+$NEW_BUILD"
+          BRANCH="release/v$NEW_SEMVER"
 
           sed -i "s/^version:.*/version: $NEW_VERSION/" pubspec.yaml
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
           git add pubspec.yaml
-          git commit -m "chore: release v$NEW_SEMVER [skip ci]"
-          git tag "v$NEW_SEMVER"
-          git push origin main
-          git push origin "v$NEW_SEMVER"
+          git commit -m "chore: release v$NEW_SEMVER"
+          git push origin "$BRANCH"
 
-          echo "bumped=true" >> "$GITHUB_OUTPUT"
-          echo "new_tag=v$NEW_SEMVER" >> "$GITHUB_OUTPUT"
+          PR_URL=$(gh pr create --title "chore: release v$NEW_SEMVER" \
+            --body "Automated version bump ($BUMP): $CURRENT_SEMVER -> $NEW_SEMVER (build $NEW_BUILD)." \
+            --base main --head "$BRANCH")
+          gh pr merge "$PR_URL" --auto --squash \
+            --subject "chore: release v$NEW_SEMVER [skip ci]" --body ""
 
-      - name: Create GitHub Release
-        if: steps.bump.outputs.bumped == 'true'
+  finalize-release:
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'release/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Tag and release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${{ steps.bump.outputs.new_tag }}" --generate-notes
+        run: |
+          set -euo pipefail
+          TAG="${{ github.head_ref }}"
+          TAG="v${TAG#release/v}"
+          git tag "$TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" --generate-notes
