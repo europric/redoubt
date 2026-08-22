@@ -88,11 +88,9 @@ jobs:
           git commit -m "chore: release v$NEW_SEMVER"
           git push origin "$BRANCH"
 
-          PR_URL=$(gh pr create --title "chore: release v$NEW_SEMVER" \
-            --body "Automated version bump ($BUMP): $CURRENT_SEMVER -> $NEW_SEMVER (build $NEW_BUILD)." \
-            --base main --head "$BRANCH")
-          gh pr merge "$PR_URL" --auto --squash \
-            --subject "chore: release v$NEW_SEMVER [skip ci]" --body ""
+          gh pr create --title "chore: release v$NEW_SEMVER" \
+            --body "Automated version bump ($BUMP): $CURRENT_SEMVER -> $NEW_SEMVER (build $NEW_BUILD). Merge manually (squash) once private-tests passes — keep \`[skip ci]\` in the squash commit subject to skip a pointless re-run." \
+            --base main --head "$BRANCH"
 
   finalize-release:
     if: github.event_name == 'pull_request' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'release/')
