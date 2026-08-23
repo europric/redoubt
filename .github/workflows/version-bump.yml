@@ -31,6 +31,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Don't bump when this push was itself a release — whether a
+          # standard merge ("Merge pull request #N from release/v0.2.0")
+          # or a squash merge ("chore: release v0.2.0").  Without this
+          # guard the finalize-release tag race creates a pointless PR
+          # for the *next* version every cycle.
+          LAST_SUBJECT=$(git log -1 --format=%s HEAD)
+          if echo "$LAST_SUBJECT" | grep -qiE "^Merge.*release/" || \
+             echo "$LAST_SUBJECT" | grep -qiE "^chore: release v[0-9]+\."; then
+            echo "Last push was a release — nothing to bump."
+            exit 0
+          fi
+
           if gh pr list --state open --json headRefName --jq '.[].headRefName' | grep -q '^release/'; then
             echo "A release PR is already open — skipping until it merges."
             exit 0
