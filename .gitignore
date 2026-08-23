@@ -9,6 +9,7 @@
 .build/
 .buildlog/
 .codegraph/
+.opencode/
 .history
 .svn/
 .swiftpm/
