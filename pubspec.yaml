@@ -1,7 +1,7 @@
 name: redoubt
 description: "Redoubt — an air-gapped Ethereum cold wallet that signs transactions via BC-UR QR codes, with no network access."
 publish_to: "none"
-version: 0.2.0+4
+version: 0.2.1+5
 
 environment:
   sdk: ^3.12.0
