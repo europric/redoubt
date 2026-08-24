@@ -98,10 +98,23 @@ class UnsupportedMnemonicLanguageFailure implements Exception {
 /// provably sendable; this class instance itself is never risked crossing
 /// the isolate boundary.
 class VaultSecret {
-  VaultSecret({required this.entropy, required this.languageWireCode});
+  VaultSecret({
+    required this.entropy,
+    required this.languageWireCode,
+    required this.isFramed,
+  });
 
   final Uint8List entropy;
   final int languageWireCode;
+
+  /// Whether this secret came from a framed plaintext (v1+ format written by
+  /// [VaultPlaintext.encode]) or a bare legacy plaintext (pre-change format).
+  ///
+  /// The D5 address-match guard in [EthTransactionSigner] uses this to
+  /// distinguish a post-cache vault whose cache write may have failed (framed,
+  /// block on null committed address) from a pre-cache vault that never had a
+  /// committed address at all (legacy, proceed on null for backward compat).
+  final bool isFramed;
 
   /// Resolves [languageWireCode] to a [MnemonicLanguage], or throws
   /// [UnsupportedMnemonicLanguageFailure] when this build does not
@@ -160,6 +173,7 @@ abstract final class VaultPlaintext {
       return VaultSecret(
         entropy: Uint8List.fromList(plaintext),
         languageWireCode: MnemonicLanguage.english.wireCode,
+        isFramed: false,
       );
     }
 
@@ -168,6 +182,7 @@ abstract final class VaultPlaintext {
       return VaultSecret(
         entropy: Uint8List.fromList(plaintext.sublist(2)),
         languageWireCode: plaintext[1],
+        isFramed: true,
       );
     }
 
