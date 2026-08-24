@@ -296,15 +296,15 @@ class _OpenArgs {
 /// [VaultCipher.open] on whatever isolate [compute] schedules it on, and
 /// then decodes the sealed-plaintext framing (design.md D6/D7) on the SAME
 /// isolate hop — so [openVaultBlobInBackground] returns a `(Uint8List,
-/// int)` record (entropy, language wire code), never a bare decrypted
-/// buffer. `Uint8List`/`int` are provably isolate-sendable; a [VaultSecret]
-/// instance itself is not risked crossing the isolate boundary (matches
-/// `core/eth/bip39_seed.dart`'s `language.wireCode`-not-the-enum
-/// convention).
-Future<(Uint8List, int)> _openSync(_OpenArgs args) async {
+/// int, bool)` record (entropy, language wire code, isFramed), never a bare
+/// decrypted buffer. `Uint8List`/`int`/`bool` are provably isolate-sendable;
+/// a [VaultSecret] instance itself is not risked crossing the isolate
+/// boundary (matches `core/eth/bip39_seed.dart`'s
+/// `language.wireCode`-not-the-enum convention).
+Future<(Uint8List, int, bool)> _openSync(_OpenArgs args) async {
   final plaintext = await VaultCipher.open(blob: args.blob, pin: args.pin);
   final secret = VaultPlaintext.decode(plaintext);
-  return (secret.entropy, secret.languageWireCode);
+  return (secret.entropy, secret.languageWireCode, secret.isFramed);
 }
 
 /// Runs [VaultCipher.open] + [VaultPlaintext.decode] on a background
@@ -334,9 +334,13 @@ Future<VaultSecret> openVaultBlobInBackground({
   required Uint8List blob,
   required Uint8List pin,
 }) async {
-  final (entropy, languageWireCode) = await compute(
+  final (entropy, languageWireCode, isFramed) = await compute(
     _openSync,
     _OpenArgs(blob, pin),
   );
-  return VaultSecret(entropy: entropy, languageWireCode: languageWireCode);
+  return VaultSecret(
+    entropy: entropy,
+    languageWireCode: languageWireCode,
+    isFramed: isFramed,
+  );
 }

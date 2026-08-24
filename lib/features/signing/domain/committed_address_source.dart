@@ -20,5 +20,11 @@ abstract interface class CommittedAddressSource {
   /// The checksummed ETH address committed at seed-commit time, or `null`
   /// if nothing has been committed yet (mirrors [PublicAccountCache.read]
   /// returning `null` for an empty cache).
+  ///
+  /// **Note**: Unlike the original D5 design (before the null-fix), the
+  /// [EthTransactionSigner] now rejects `null` with a
+  /// [PassphraseMismatchFailure] — a null cache is a reachable edge case
+  /// (stale session, race condition) and failing open would silently sign
+  /// with the wrong (uncommitted) key.
   Future<String?> committedAddress();
 }

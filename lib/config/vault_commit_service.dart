@@ -132,11 +132,26 @@ class VaultCommitService implements SeedCommitter {
       // ordering is load-bearing.
       await sealedVaultRepository.writeBlob(blob);
 
-      await accountCache.write(
-        account: derived.account,
-        derivationPath: kAccountDerivationPath,
-        pairing: derived.pairingKey,
-      );
+      try {
+        await accountCache.write(
+          account: derived.account,
+          derivationPath: kAccountDerivationPath,
+          pairing: derived.pairingKey,
+        );
+      } catch (e) {
+        // Rollback: blob was durably written but the cache write failed —
+        // delete the blob to prevent an orphan vault that the D5 guard
+        // can't verify.
+        try {
+          await sealedVaultRepository.deleteBlob();
+        } catch (_) {
+          // Double fault: the rollback itself also failed. Swallow this
+          // failure and rethrow the original cache-write exception — the
+          // caller needs to know why commit() failed, not that cleanup
+          // stumbled afterward.
+        }
+        rethrow;
+      }
 
       // Legacy cleanup: only reached once the new blob + cache are both
       // durably written. Harmless no-op if no legacy key ever existed.

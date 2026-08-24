@@ -39,7 +39,10 @@ abstract interface class TransactionSigner {
   /// corrupt blob are different failures" decision); callers should route
   /// to the vault recovery flow instead of offering a retry. Throws
   /// [PassphraseMismatchFailure] if the freshly-derived address does not
-  /// match the vault's commit-time address (design.md D5) — the unlock
+  /// match the vault's commit-time address (design.md D5) — also thrown
+  /// when [CommittedAddressSource.committedAddress] returns `null` (the
+  /// cache is empty, meaning no address was ever committed; signing with
+  /// the uncommitted key would be a silent wrong-wallet bug). The unlock
   /// throttle is NOT charged (the PIN was correct; `recordSuccess()` has
   /// already run), and no signature is produced.
   Future<SignedResult?> sign(
