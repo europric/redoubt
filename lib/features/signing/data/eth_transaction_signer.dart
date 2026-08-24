@@ -136,12 +136,14 @@ class EthTransactionSigner implements TransactionSigner {
         addressKey.bip32.publicKey.compressed,
       );
       final committed = await committedAddressSource.committedAddress();
-      // `committed == null` proceeds: unreachable in practice
-      // (`public-account-cache` spec's "Empty Cache Routes Straight To
-      // Onboarding" already routes an empty cache away from ever reaching
-      // a sign screen) and failing closed here would brick signing for no
-      // reachable benefit.
-      if (committed != null &&
+      // `committed == null` now fails closed: the `public-account-cache`
+      // spec's "Empty Cache Routes Straight To Onboarding" still generally
+      // prevents reaching a sign screen without a committed address, but an
+      // empty cache is reachable through e.g. a stale session or a race, and
+      // failing open here would silently sign with the wrong (uncommitted)
+      // key — the most dangerous possible failure mode. See the D5 ADR for
+      // the full risk analysis.
+      if (committed == null ||
           committed.toLowerCase() != derivedAddress.toLowerCase()) {
         throw const PassphraseMismatchFailure();
       }
