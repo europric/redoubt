@@ -39,6 +39,7 @@ class FountainDecodeException implements Exception {
 /// fragments are at most a few KB; anything near this bound is either a
 /// bug or a hostile payload trying to force excessive allocation.
 const int maxReasonableFragmentLength = 1 << 20; // 1 MiB
+const int maxReasonableSeqLen = 500; // ~500 fragments max — real Ethereum UR messages use <50
 
 /// One part of a multi-part BC-UR message.
 ///
@@ -180,6 +181,11 @@ class FountainDecoder {
       _messageLength = part.messageLength;
       _checksum = part.checksum;
       _fragmentLength = part.fragment.length;
+      if (part.seqLen > maxReasonableSeqLen) {
+        throw FountainDecodeException(
+          'seqLen too large (${part.seqLen}) — max $maxReasonableSeqLen',
+        );
+      }
       _fragments = List<Uint8List?>.filled(part.seqLen, null);
     } else {
       if (part.seqLen != _seqLen) {
