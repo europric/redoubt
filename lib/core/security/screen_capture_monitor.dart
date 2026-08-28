@@ -107,18 +107,24 @@ class PlatformScreenCaptureMonitor implements ScreenCaptureMonitor {
           }
         }
 
-        final sub = source
-            .where((e) => e['type'] == 'screenshot')
-            .listen(
-              (_) => out.add(null),
-              onError: out.addError,
-              onDone: () {
-                release();
-                out.close();
-              },
-            );
+        session.registerScreenshotSink(out);
+
+        // Screenshot-typed events are dispatched directly to the
+        // single-owner slot (see [_CaptureSession._dispatchScreenshot]), not
+        // forwarded through this subscription — only onError/onDone
+        // propagation is needed from `source` here.
+        final sub = source.listen(
+          (_) {},
+          onError: out.addError,
+          onDone: () {
+            session.unregisterScreenshotSink(out);
+            release();
+            out.close();
+          },
+        );
 
         out.onCancel = () {
+          session.unregisterScreenshotSink(out);
           release();
           return sub.cancel();
         };
@@ -127,6 +133,11 @@ class PlatformScreenCaptureMonitor implements ScreenCaptureMonitor {
   /// Resets the shared [_CaptureSession] singleton. For test isolation only.
   @visibleForTesting
   static void debugReset() => _CaptureSession.debugReset();
+
+  /// Overrides the clock used to arm/evaluate the screenshot-warning
+  /// handoff TTL. For deterministic tests only; restored by [debugReset].
+  @visibleForTesting
+  static set debugNow(DateTime Function() now) => _CaptureSession.debugNow = now;
 }
 
 /// Process-level singleton that owns the single [EventChannel] registration,
@@ -159,6 +170,30 @@ class _CaptureSession {
 
   /// Exposed for replay in [Stream.multi] views.
   bool? get lastIsCaptured => _lastIsCaptured;
+
+  /// How long an unowned (or owner-less, post-transfer-search) screenshot
+  /// warning may still be delivered to a newly (re)subscribing sink.
+  static const Duration screenshotHandoffWindow = Duration(seconds: 2);
+
+  /// Clock used to arm/evaluate [screenshotHandoffWindow]. Overridable via
+  /// [PlatformScreenCaptureMonitor.debugNow] for deterministic tests —
+  /// deliberately not a [Timer], so the TTL cannot be skewed by
+  /// [WidgetTester.runAsync] or a FakeAsync zone.
+  @visibleForTesting
+  static DateTime Function() debugNow = DateTime.now;
+
+  /// Live `screenshots` sinks, in subscription order (newest last).
+  final List<MultiStreamController<void>> _screenshotSinks = [];
+
+  /// When the current warning was armed, or `null` if none is pending.
+  DateTime? _pendingScreenshotAt;
+
+  /// The sink currently holding the pending warning, or `null` if unowned.
+  MultiStreamController<void>? _screenshotOwner;
+
+  /// Sinks that have already received the current warning — guarantees no
+  /// sink is ever offered the same warning twice.
+  final Set<MultiStreamController<void>> _screenshotSeenBy = {};
 
   /// The single broadcast controller for decoded native events.
   StreamController<Map<Object?, Object?>>? _controller;
@@ -247,6 +282,8 @@ class _CaptureSession {
         // Cache isCaptured value before dispatching.
         if (typed['type'] == 'isCaptured') {
           _lastIsCaptured = typed['value'] as bool?;
+        } else if (typed['type'] == 'screenshot') {
+          _dispatchScreenshot();
         }
         _controller?.add(typed);
       }
@@ -262,6 +299,13 @@ class _CaptureSession {
   /// native `cancel`, clears the cached value, and closes the controller.
   /// [PlatformException] from cancel is silently swallowed (unactionable with
   /// no subscriber left).
+  ///
+  /// **Deliberately does NOT clear the screenshot-warning slot** (unlike
+  /// [_lastIsCaptured], which it does clear). The slot's whole purpose is to
+  /// survive exactly this sequence: last sink cancels -> teardown queued ->
+  /// next screen subscribes within [screenshotHandoffWindow]. A future
+  /// reader "fixing" this back to match the [_lastIsCaptured] pattern would
+  /// silently reintroduce the lost-warning defect this class exists to fix.
   Future<void> _teardownIfIdle() async {
     if (_refs > 0 || !_open) return;
 
@@ -282,6 +326,63 @@ class _CaptureSession {
     await c?.close();
   }
 
+  // --- Screenshot single-owner warning slot ---
+
+  /// Arms a new warning and offers it to the newest live sink, if any.
+  /// Clears [_screenshotSeenBy] — a new native event is a new warning, not a
+  /// repeat of a previous one.
+  void _dispatchScreenshot() {
+    _pendingScreenshotAt = debugNow();
+    _screenshotSeenBy.clear();
+    if (_screenshotSinks.isNotEmpty) {
+      _offerTo(_screenshotSinks.last);
+    }
+  }
+
+  /// Registers a new live `screenshots` sink. If a warning is armed, within
+  /// [screenshotHandoffWindow], unowned, and not already seen by this sink,
+  /// offers it immediately.
+  void registerScreenshotSink(MultiStreamController<void> out) {
+    _screenshotSinks.add(out);
+    if (_pendingScreenshotAt != null &&
+        _withinHandoffWindow() &&
+        _screenshotOwner == null &&
+        !_screenshotSeenBy.contains(out)) {
+      _offerTo(out);
+    }
+  }
+
+  /// Unregisters a `screenshots` sink. If it was the owner, ownership
+  /// transfers to the newest remaining unseen sink, provided the warning is
+  /// still armed and within the TTL; otherwise the warning is left unowned
+  /// for the next subscriber.
+  void unregisterScreenshotSink(MultiStreamController<void> out) {
+    _screenshotSinks.remove(out);
+    if (!identical(_screenshotOwner, out)) return;
+
+    _screenshotOwner = null;
+    if (_pendingScreenshotAt == null || !_withinHandoffWindow()) return;
+
+    for (var i = _screenshotSinks.length - 1; i >= 0; i--) {
+      final candidate = _screenshotSinks[i];
+      if (!_screenshotSeenBy.contains(candidate)) {
+        _offerTo(candidate);
+        return;
+      }
+    }
+  }
+
+  bool _withinHandoffWindow() {
+    final at = _pendingScreenshotAt;
+    return at != null && debugNow().difference(at) <= screenshotHandoffWindow;
+  }
+
+  void _offerTo(MultiStreamController<void> sink) {
+    _screenshotOwner = sink;
+    _screenshotSeenBy.add(sink);
+    sink.add(null);
+  }
+
   // --- Test isolation ---
 
   @visibleForTesting
@@ -293,6 +394,11 @@ class _CaptureSession {
     s._terminal = false;
     s._lastIsCaptured = null;
     s._controller = null;
+    s._screenshotSinks.clear();
+    s._pendingScreenshotAt = null;
+    s._screenshotOwner = null;
+    s._screenshotSeenBy.clear();
+    debugNow = DateTime.now;
     _channel.binaryMessenger.setMessageHandler(_name, null);
   }
 }
