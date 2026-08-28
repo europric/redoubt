@@ -60,6 +60,11 @@ import 'sign_review_controller.dart';
 /// with a type-aware layout. [EthSignDataType.transaction] shows all 4
 /// cards; [EthSignDataType.typedData] and
 /// [EthSignDataType.personalMessage] show a badge + collapsed hex only.
+///
+/// **redoubt-critical-fix-round3 (GitHub #28, design.md D5)**: every data
+/// type — including the two above — also shows an origin-disclosure card
+/// (`_OriginCard`) directly below the badge, labeled unverified/
+/// requester-supplied. It is never presented as a confirmed identity.
 class SignReviewPage extends StatelessWidget {
   const SignReviewPage({
     super.key,
@@ -98,6 +103,13 @@ class SignReviewPage extends StatelessWidget {
                   children: [
                     // Data type badge — always shown
                     _DataHeaderBadge(dataType: request.dataType),
+                    const SizedBox(height: 16),
+
+                    // Origin disclosure — always shown, on all four data
+                    // types (design.md D5, `signing-request-disclosure`
+                    // spec's "Universal Origin Disclosure" requirement).
+                    // Never a confirmed identity.
+                    _OriginCard(origin: request.origin),
                     const SizedBox(height: 16),
 
                     // Type-aware layout
@@ -715,6 +727,53 @@ class _DataHeaderBadge extends StatelessWidget {
           fontWeight: FontWeight.w600,
           letterSpacing: 1.5,
         ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// redoubt-critical-fix-round3 (GitHub #28): Origin Disclosure Card
+// ═══════════════════════════════════════════════════════════════
+
+/// Discloses `request.origin` as plain scanned text — labeled explicitly
+/// as unverified/requester-supplied, never presented as a confirmed
+/// identity (design.md D5, `signing-request-disclosure` spec's "Universal
+/// Origin Disclosure" requirement). Shown on ALL FOUR data types,
+/// including the blocked ones — "who is asking" frames everything below
+/// it. Deliberately no copy affordance (`copyValue: null` on the
+/// underlying [_TransactionReviewCard]) — copying an unverified origin
+/// invites paste-into-browser. Never eip55-processed, never linkified,
+/// never wrapped in an [InkWell].
+class _OriginCard extends StatelessWidget {
+  const _OriginCard({required this.origin});
+
+  final String? origin;
+
+  @override
+  Widget build(BuildContext context) {
+    return _TransactionReviewCard(
+      label: 'Requested by',
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SelectableText(
+            origin ?? 'Not provided',
+            style: const TextStyle(
+              fontFamily: RedoubtTokens.monoFamily,
+              fontSize: 14,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Unverified — supplied by the requester, not confirmed by '
+            'this wallet.',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.grey[600],
+            ),
+          ),
+        ],
       ),
     );
   }
