@@ -93,4 +93,14 @@ class RevealSeedController extends ChangeNotifier {
       notifyListeners();
     }
   }
+
+  /// Zeroizes the revealed mnemonic's entropy buffer before this
+  /// controller is discarded (#30, `seed-exposure-protection` spec) — the
+  /// whole point of gating this screen behind a PIN is defeated if the
+  /// revealed phrase's entropy survives past the screen's own lifetime.
+  @override
+  void dispose() {
+    _state.dataOrNull?.zeroize();
+    super.dispose();
+  }
 }
