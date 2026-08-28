@@ -113,6 +113,10 @@ class _PassphraseOptInFieldState extends State<PassphraseOptInField> {
               key: const Key('passphraseField'),
               controller: _passphraseField,
               obscureText: true,
+              // #29: never surface a passphrase to the keyboard's
+              // spell-check/suggestion service.
+              autocorrect: false,
+              enableSuggestions: false,
               decoration: const InputDecoration(labelText: 'Passphrase'),
             ),
           ),
@@ -123,6 +127,10 @@ class _PassphraseOptInFieldState extends State<PassphraseOptInField> {
                 key: const Key('passphraseConfirmField'),
                 controller: _confirmField,
                 obscureText: true,
+                // #29: never surface a passphrase to the keyboard's
+                // spell-check/suggestion service.
+                autocorrect: false,
+                enableSuggestions: false,
                 decoration: const InputDecoration(
                   labelText: 'Confirm passphrase',
                 ),

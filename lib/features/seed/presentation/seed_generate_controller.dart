@@ -29,4 +29,13 @@ class SeedGenerateController extends ChangeNotifier {
     _mnemonic = mnemonicService.generate();
     notifyListeners();
   }
+
+  /// Zeroizes the held mnemonic's entropy buffer before this controller is
+  /// discarded (#30, `seed-exposure-protection` spec) — a generated
+  /// mnemonic must not linger in memory once its owning screen is gone.
+  @override
+  void dispose() {
+    _mnemonic?.zeroize();
+    super.dispose();
+  }
 }

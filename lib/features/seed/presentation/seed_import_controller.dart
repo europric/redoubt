@@ -143,4 +143,14 @@ class SeedImportController extends ChangeNotifier {
       passphraseUtf8: draft.takePassphrase(),
     );
   }
+
+  /// Zeroizes the imported mnemonic's entropy buffer before this
+  /// controller is discarded (#30, `seed-exposure-protection` spec) — a
+  /// validated-but-not-yet-committed (or already-committed) mnemonic must
+  /// not linger in memory once its owning screen is gone.
+  @override
+  void dispose() {
+    _importState.dataOrNull?.zeroize();
+    super.dispose();
+  }
 }

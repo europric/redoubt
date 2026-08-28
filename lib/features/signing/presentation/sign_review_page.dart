@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:redoubt/core/eth/eth.dart';
 import 'package:redoubt/core/presentation/presentation.dart';
 import 'package:redoubt/core/ur/registry/eth_sign_request.dart';
 import 'package:redoubt/features/seed/seed.dart';
@@ -723,6 +724,23 @@ class _DataHeaderBadge extends StatelessWidget {
 // Phase 2.3: Address Card
 // ═══════════════════════════════════════════════════════════════
 
+/// Renders [hex] in EIP-55 checksum case when it is a well-formed 20-byte
+/// address, and returns it unchanged otherwise (#21,
+/// `eip55-address-display` spec). Deliberately tolerant — unlike
+/// [eip55ChecksumAddress] itself — because [_AddressCard.address] can be
+/// `null` (contract creation) or a non-address hex string, and this
+/// wrapper must never throw. [abbreviateAddress] stays untouched: it also
+/// abbreviates non-address hex (e.g. calldata params), so the checksum is
+/// applied here, one layer before abbreviation.
+String? _checksummedAddressOrRaw(String? hex) {
+  if (hex == null) return null;
+  try {
+    return eip55ChecksumAddress(hex);
+  } on FormatException {
+    return hex;
+  }
+}
+
 /// Displays an abbreviated address with a copy-to-clipboard icon.
 class _AddressCard extends StatelessWidget {
   const _AddressCard({required this.address});
@@ -731,11 +749,12 @@ class _AddressCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final checksummed = _checksummedAddressOrRaw(address);
     return _TransactionReviewCard(
       label: 'Recipient',
-      copyValue: address,
+      copyValue: checksummed,
       content: SelectableText(
-        abbreviateAddress(address),
+        abbreviateAddress(checksummed),
         style: const TextStyle(
           fontFamily: RedoubtTokens.monoFamily,
           fontSize: 14,
