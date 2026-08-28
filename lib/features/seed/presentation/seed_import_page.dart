@@ -122,6 +122,10 @@ class _SeedImportPageState extends State<SeedImportPage> {
                 TextField(
                   controller: _phraseField,
                   maxLines: 4,
+                  // #29: never surface a recovery phrase to the keyboard's
+                  // spell-check/suggestion service.
+                  autocorrect: false,
+                  enableSuggestions: false,
                   decoration: const InputDecoration(
                     labelText: 'Recovery phrase',
                   ),
