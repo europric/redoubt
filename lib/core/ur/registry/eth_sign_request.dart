@@ -143,11 +143,21 @@ class EthSignRequest {
     final chainIdItem = value[const CborSmallInt(_keyChainId)];
     final addressItem = value[const CborSmallInt(_keyAddress)];
     final originItem = value[const CborSmallInt(_keyOrigin)];
+    final chainId = chainIdItem is CborSmallInt ? chainIdItem.value : null;
+    // #31 — a present-but-non-positive chainId must never reach EIP-155 `v`
+    // computation (`eip155V` in `core/eth/signing.dart`, applied from
+    // `EthTransactionSigner.sign()`): `chainId <= 0` produces a nonsensical/
+    // ambiguous `v`. Rejected at the earliest possible chokepoint — decode
+    // time — rather than deferred to the signing call site. A request with
+    // no chainId at all (`null`, e.g. `personalMessage`) is unaffected.
+    if (chainId != null && chainId <= 0) {
+      throw EthSignRequestDecodeException('invalid chainId: $chainId (must be > 0)');
+    }
     return EthSignRequest(
       requestId: requestIdItem != null ? uuidFromCborValue(requestIdItem) : null,
       signData: Uint8List.fromList(signDataItem.bytes),
       dataType: EthSignDataType.fromValue(dataTypeItem.value),
-      chainId: chainIdItem is CborSmallInt ? chainIdItem.value : null,
+      chainId: chainId,
       derivationPath: CryptoKeypath.fromCborValue(derivationPathItem),
       address: addressItem is CborBytes ? Uint8List.fromList(addressItem.bytes) : null,
       origin: originItem is CborString ? originItem.toString() : null,
