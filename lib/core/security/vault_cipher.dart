@@ -29,7 +29,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart' as crypto;
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, kDebugMode;
 import 'package:meta/meta.dart';
 
 import 'argon2_kdf.dart';
@@ -62,6 +62,16 @@ abstract final class VaultCipher {
   /// is all-zero AFTER the call returns, proving the zeroization actually
   /// ran at runtime rather than merely asserting the word `fillRange`
   /// appears near `finally` in source. Never read by production code.
+  ///
+  /// **Guarded by `kDebugMode` (#20)**: `@visibleForTesting` is a
+  /// lint-level annotation only — it does not stop production code from
+  /// reading or writing this field, so a memory dump or attached debugger
+  /// against a release build could otherwise extract the KEK from here
+  /// even after the `finally` block zeroizes the local copy. Every
+  /// assignment below is wrapped in `if (kDebugMode)`, a compile-time
+  /// constant a `--release`/`--profile` build folds away entirely — so in
+  /// a real release build this field is never populated at all, and stays
+  /// permanently `null`.
   @visibleForTesting
   static Uint8List? debugLastKek;
 
@@ -69,6 +79,9 @@ abstract final class VaultCipher {
   /// AEAD-library decrypted buffer (the intermediate that gets zeroized in
   /// `open()`'s `finally` block) — distinct from the fresh copy `open()`
   /// actually returns to its caller. Never read by production code.
+  ///
+  /// **Guarded by `kDebugMode` (#20)** — see [debugLastKek]'s doc comment;
+  /// the same reasoning and guard apply here.
   @visibleForTesting
   static Uint8List? debugLastRawDecryptedIntermediate;
 
@@ -109,7 +122,9 @@ abstract final class VaultCipher {
         password: pin,
         params: params.withSalt(salt),
       );
-      debugLastKek = kek;
+      if (kDebugMode) {
+        debugLastKek = kek;
+      }
 
       final secretBox = await algorithm.encrypt(
         plaintext,
@@ -188,7 +203,9 @@ abstract final class VaultCipher {
           salt: parsed.header.salt,
         ),
       );
-      debugLastKek = kek;
+      if (kDebugMode) {
+        debugLastKek = kek;
+      }
 
       final List<int> decrypted;
       try {
@@ -206,7 +223,9 @@ abstract final class VaultCipher {
       }
 
       rawPlaintext = Uint8List.fromList(decrypted);
-      debugLastRawDecryptedIntermediate = rawPlaintext;
+      if (kDebugMode) {
+        debugLastRawDecryptedIntermediate = rawPlaintext;
+      }
 
       // Return a distinct copy — see this file's doc comment on why the
       // finally block below can safely zeroize [rawPlaintext] without
