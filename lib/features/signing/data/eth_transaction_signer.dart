@@ -62,6 +62,16 @@ class EthTransactionSigner implements TransactionSigner {
   final AuthService authService;
   final Bip39SeedDeriver _seedDeriver;
 
+  /// Dismiss-loop guard (#22, design.md D2): counts consecutive uncharged
+  /// biometric-prompt dismissals since the last genuine (successful) attempt
+  /// or the last time this counter fired. 2 dismissals are free; the 3rd
+  /// consecutive one charges [unlockThrottle] once and resets this to zero,
+  /// before PIN fallback becomes reachable again. Reset to zero on any
+  /// successful [AuthService.authenticate] call. In-memory only, by design
+  /// (no persisted-format change; the durable control stays the throttle
+  /// itself, see design.md D2's rejected-alternatives note).
+  int _consecutiveDismissals = 0;
+
   /// The commit-time committed address this vault's address is checked
   /// against on every sign (design.md D5 — required, not nullable: "a
   /// nullable seam lets a fake silently disable the guard").
@@ -93,18 +103,32 @@ class EthTransactionSigner implements TransactionSigner {
     // comment on why this ordering matters.
     VaultBlob.decodeBytes(blob);
 
-    await unlockThrottle.recordAttemptStart();
-
+    // #22 fix (design.md D2): recordAttemptStart() no longer fires merely
+    // because a biometric prompt was SHOWN — only once a genuine attempt
+    // has resolved (a successful authenticate(), or auth being unsupported
+    // at all, both of which fall through to the KDF below). A denied/
+    // cancelled/failed prompt is instead tracked by the in-memory
+    // [_consecutiveDismissals] dismiss-loop guard: 2 consecutive dismissals
+    // stay free, the 3rd charges the throttle once and resets the counter,
+    // closing the "cycle the biometric prompt forever, never pay the
+    // throttle" loophole without penalizing an isolated accidental cancel.
     if (await authService.isSupported()) {
       final authenticated = await authService.authenticate();
       if (!authenticated) {
-        // Denied, cancelled, or failed — never touch the KDF. The throttle
-        // charge from recordAttemptStart() above stands (a real attempt
-        // was requested and denied), matching this class's pre-PR7 "auth
-        // denied -> null" convention.
+        // Denied, cancelled, or failed — never touch the KDF.
+        _consecutiveDismissals++;
+        if (_consecutiveDismissals == 3) {
+          await unlockThrottle.recordAttemptStart();
+          _consecutiveDismissals = 0;
+        }
         return null;
       }
+      // A genuine (successful) attempt always resets the dismissal streak,
+      // whether or not it had already accumulated any free dismissals.
+      _consecutiveDismissals = 0;
     }
+
+    await unlockThrottle.recordAttemptStart();
 
     VaultSecret? secret;
     Uint8List? privateKeyBytes;
