@@ -61,6 +61,7 @@
 /// (design.md's "Clock caveat").
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -103,6 +104,35 @@ class FlutterUnlockThrottle implements UnlockThrottle {
   static const _key = 'vault.unlock.throttle';
   static const _capSeconds = 15 * 60;
 
+  /// #27 TOCTOU fix (design.md D3): class-level (not per-instance) tail
+  /// that serializes read-modify-write access to the single
+  /// `vault.unlock.throttle` storage key across every [FlutterUnlockThrottle]
+  /// instance. Class-scoped, not instance-scoped, because this class has a
+  /// `const` constructor and is built as `const FlutterUnlockThrottle()` at
+  /// multiple call sites — an instance field would force dropping `const`,
+  /// splitting one canonicalized object into unsynchronized instances that
+  /// all still share the same underlying storage key. The tail never
+  /// carries an error forward (a throwing op is caught and completed on its
+  /// own [Completer], never left on `_tail` itself), so one failing
+  /// operation cannot poison every later one queued behind it. Only the
+  /// three writers ([recordAttemptStart], [recordSuccess],
+  /// [clearThrottleState]) are serialized; readers stay unserialized — a
+  /// single read observing either the pre- or post-write state is always a
+  /// valid observation.
+  static Future<void> _tail = Future<void>.value();
+
+  static Future<T> _serialized<T>(Future<T> Function() action) {
+    final completer = Completer<T>();
+    _tail = _tail.then((_) async {
+      try {
+        completer.complete(await action());
+      } catch (e, s) {
+        completer.completeError(e, s);
+      }
+    });
+    return completer.future;
+  }
+
   // Same underlying keystore/keychain configuration as
   // `FlutterPublicAccountCache` -- reads/writes its own key
   // (`vault.unlock.throttle`), never gated by `AuthenticatedSeedRepository`
@@ -140,7 +170,7 @@ class FlutterUnlockThrottle implements UnlockThrottle {
   Future<int> failedAttempts() async => (await _readState()).failedAttempts;
 
   @override
-  Future<void> recordAttemptStart() async {
+  Future<void> recordAttemptStart() => _serialized(() async {
     final state = await _readState();
     await _writeState(
       _ThrottleState(
@@ -148,14 +178,12 @@ class FlutterUnlockThrottle implements UnlockThrottle {
         lastAttemptAtMs: _now().millisecondsSinceEpoch,
       ),
     );
-  }
+  });
 
   @override
-  Future<void> recordSuccess() async {
-    await _writeState(
-      const _ThrottleState(failedAttempts: 0, lastAttemptAtMs: 0),
-    );
-  }
+  Future<void> recordSuccess() => _serialized(
+    () => _writeState(const _ThrottleState(failedAttempts: 0, lastAttemptAtMs: 0)),
+  );
 
   @override
   Future<Duration> remainingDelay() async {
@@ -181,7 +209,7 @@ class FlutterUnlockThrottle implements UnlockThrottle {
   }
 
   @override
-  Future<void> clearThrottleState() => _storage.delete(key: _key);
+  Future<void> clearThrottleState() => _serialized(() => _storage.delete(key: _key));
 
   Future<_ThrottleState> _readState() async {
     final raw = await _storage.read(key: _key);

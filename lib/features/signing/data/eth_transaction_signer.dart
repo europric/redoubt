@@ -37,6 +37,7 @@ library;
 import 'dart:typed_data';
 
 import 'package:blockchain_utils/blockchain_utils.dart' hide Mnemonic;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:redoubt/core/bip39/bip39.dart';
 import 'package:redoubt/core/eth/eth.dart';
 import 'package:redoubt/core/security/security.dart';
@@ -53,11 +54,23 @@ class EthTransactionSigner implements TransactionSigner {
     required this.unlockThrottle,
     required this.authService,
     required this.committedAddressSource,
-  });
+    @visibleForTesting Bip39SeedDeriver? seedDeriver,
+  }) : _seedDeriver = seedDeriver ?? deriveBip39SeedInBackground;
 
   final SealedVaultRepository sealedVaultRepository;
   final UnlockThrottle unlockThrottle;
   final AuthService authService;
+  final Bip39SeedDeriver _seedDeriver;
+
+  /// Dismiss-loop guard (#22, design.md D2): counts consecutive uncharged
+  /// biometric-prompt dismissals since the last genuine (successful) attempt
+  /// or the last time this counter fired. 2 dismissals are free; the 3rd
+  /// consecutive one charges [unlockThrottle] once and resets this to zero,
+  /// before PIN fallback becomes reachable again. Reset to zero on any
+  /// successful [AuthService.authenticate] call. In-memory only, by design
+  /// (no persisted-format change; the durable control stays the throttle
+  /// itself, see design.md D2's rejected-alternatives note).
+  int _consecutiveDismissals = 0;
 
   /// The commit-time committed address this vault's address is checked
   /// against on every sign (design.md D5 — required, not nullable: "a
@@ -90,18 +103,32 @@ class EthTransactionSigner implements TransactionSigner {
     // comment on why this ordering matters.
     VaultBlob.decodeBytes(blob);
 
-    await unlockThrottle.recordAttemptStart();
-
+    // #22 fix (design.md D2): recordAttemptStart() no longer fires merely
+    // because a biometric prompt was SHOWN — only once a genuine attempt
+    // has resolved (a successful authenticate(), or auth being unsupported
+    // at all, both of which fall through to the KDF below). A denied/
+    // cancelled/failed prompt is instead tracked by the in-memory
+    // [_consecutiveDismissals] dismiss-loop guard: 2 consecutive dismissals
+    // stay free, the 3rd charges the throttle once and resets the counter,
+    // closing the "cycle the biometric prompt forever, never pay the
+    // throttle" loophole without penalizing an isolated accidental cancel.
     if (await authService.isSupported()) {
       final authenticated = await authService.authenticate();
       if (!authenticated) {
-        // Denied, cancelled, or failed — never touch the KDF. The throttle
-        // charge from recordAttemptStart() above stands (a real attempt
-        // was requested and denied), matching this class's pre-PR7 "auth
-        // denied -> null" convention.
+        // Denied, cancelled, or failed — never touch the KDF.
+        _consecutiveDismissals++;
+        if (_consecutiveDismissals == 3) {
+          await unlockThrottle.recordAttemptStart();
+          _consecutiveDismissals = 0;
+        }
         return null;
       }
+      // A genuine (successful) attempt always resets the dismissal streak,
+      // whether or not it had already accumulated any free dismissals.
+      _consecutiveDismissals = 0;
     }
+
+    await unlockThrottle.recordAttemptStart();
 
     VaultSecret? secret;
     Uint8List? privateKeyBytes;
@@ -202,21 +229,35 @@ class EthTransactionSigner implements TransactionSigner {
   ///
   /// [language] is read from the opened vault's [VaultSecret] (D8/D9) —
   /// never supplied by the UI, never defaulted here.
+  ///
+  /// **Seed zeroization (#25, design.md D4)**: the intermediate 64-byte
+  /// BIP-39 seed is zero-filled in a `finally` block before this method
+  /// returns — on success AND on any error thrown from the derivation
+  /// chain — so no copy of it survives past this call. Safe because
+  /// `Bip32Base.fromSeed` copies the seed via `asImmutableBytes` (no
+  /// aliasing) and [_seedDeriver] (`compute` by default) returns a fresh,
+  /// isolate-transferred buffer this method exclusively owns. The derived
+  /// private key itself remains unzeroizable (`final BigInt
+  /// secretMultiplier`) — an accepted, documented residual limitation.
   Future<Bip44> _addressLevelKey(
     Uint8List entropy, {
     required MnemonicLanguage language,
     Uint8List? passphraseUtf8,
   }) async {
-    final seed = await deriveBip39SeedInBackground(
+    final seed = await _seedDeriver(
       entropy,
       language: language,
       passphraseUtf8: passphraseUtf8,
     );
-    final master = Bip44.fromSeed(seed, Bip44Coins.ethereum);
-    return master.purpose.coin
-        .account(0)
-        .change(Bip44Changes.chainExt)
-        .addressIndex(0);
+    try {
+      final master = Bip44.fromSeed(seed, Bip44Coins.ethereum);
+      return master.purpose.coin
+          .account(0)
+          .change(Bip44Changes.chainExt)
+          .addressIndex(0);
+    } finally {
+      seed.fillRange(0, seed.length, 0);
+    }
   }
 }
 

@@ -59,42 +59,50 @@ class Bip32AccountDerivationService implements AccountDerivationService {
       language: language,
       passphraseUtf8: passphraseUtf8,
     );
-    final masterKey = Bip44.fromSeed(seed, Bip44Coins.ethereum);
+    try {
+      final masterKey = Bip44.fromSeed(seed, Bip44Coins.ethereum);
 
-    // `m/44'/60'/0'` — the pairing account-level key (public-derivable).
-    final accountKey = masterKey.purpose.coin.account(0);
+      // `m/44'/60'/0'` — the pairing account-level key (public-derivable).
+      final accountKey = masterKey.purpose.coin.account(0);
 
-    // `m/44'/60'/0'/0/0` — the single fixed signing account this vault
-    // ever uses (`ethereum-account` spec's "Single Fixed-Path Derivation").
-    final addressKey = accountKey.change(Bip44Changes.chainExt).addressIndex(0);
+      // `m/44'/60'/0'/0/0` — the single fixed signing account this vault
+      // ever uses (`ethereum-account` spec's "Single Fixed-Path Derivation").
+      final addressKey = accountKey.change(Bip44Changes.chainExt).addressIndex(0);
 
-    final address = EthAddrEncoder().encodeKey(
-      addressKey.bip32.publicKey.compressed,
-    );
+      final address = EthAddrEncoder().encodeKey(
+        addressKey.bip32.publicKey.compressed,
+      );
 
-    final pubKey = accountKey.bip32.publicKey;
-    final pairingKey = AccountPairingKey(
-      publicKeyCompressed: List<int>.unmodifiable(pubKey.compressed),
-      chainCode: List<int>.unmodifiable(pubKey.chainCode.toBytes()),
-      // `m` — the master key, used only to compute the pairing QR's
-      // `source-fingerprint` (BCR-2020-007's
-      // `crypto-keypath.source-fingerprint` is the fingerprint of the ROOT
-      // key a path was derived from, distinct from the derived key's own
-      // immediate-parent fingerprint).
-      sourceFingerprint: _fingerprintToInt(
-        masterKey.bip32.publicKey.fingerPrint.toBytes(),
-      ),
-      parentFingerprint: _fingerprintToInt(
-        accountKey.bip32.parentFingerPrint.toBytes(),
-      ),
-      depth: accountKey.bip32.depth.toInt(),
-      pathIndexes: const [44, 60, 0],
-    );
+      final pubKey = accountKey.bip32.publicKey;
+      final pairingKey = AccountPairingKey(
+        publicKeyCompressed: List<int>.unmodifiable(pubKey.compressed),
+        chainCode: List<int>.unmodifiable(pubKey.chainCode.toBytes()),
+        // `m` — the master key, used only to compute the pairing QR's
+        // `source-fingerprint` (BCR-2020-007's
+        // `crypto-keypath.source-fingerprint` is the fingerprint of the ROOT
+        // key a path was derived from, distinct from the derived key's own
+        // immediate-parent fingerprint).
+        sourceFingerprint: _fingerprintToInt(
+          masterKey.bip32.publicKey.fingerPrint.toBytes(),
+        ),
+        parentFingerprint: _fingerprintToInt(
+          accountKey.bip32.parentFingerPrint.toBytes(),
+        ),
+        depth: accountKey.bip32.depth.toInt(),
+        pathIndexes: const [44, 60, 0],
+      );
 
-    return DerivedAccount(
-      account: EthAccount(address: address),
-      pairingKey: pairingKey,
-    );
+      return DerivedAccount(
+        account: EthAccount(address: address),
+        pairingKey: pairingKey,
+      );
+    } finally {
+      // Seed zeroization (#25 design-found twin — identical defect/fix as
+      // `EthTransactionSigner._addressLevelKey`, design.md D4): this
+      // derives the same committed address that vault's signing path
+      // guards against, so it is inside the same seed-erase blast radius.
+      seed.fillRange(0, seed.length, 0);
+    }
   }
 
   int _fingerprintToInt(List<int> fingerprintBytes) =>

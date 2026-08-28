@@ -10,11 +10,6 @@ analyzer:
     # Separate nested package (own pubspec.yaml/deps) — analyzed on its own,
     # not as part of this package's analysis context (task 1.5 spike).
     - tool/wallet_lints/**
-  # Optional editor-only custom_lint plugin (task 1.5 spike). Purely
-  # additive — tool/check_architecture.dart is the mandatory CI gate
-  # regardless of whether this loads in a given editor/CI environment.
-  plugins:
-    - custom_lint
 include: package:flutter_lints/flutter.yaml
 
 linter:
