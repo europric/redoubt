@@ -5,6 +5,8 @@ library;
 
 import 'dart:typed_data';
 
+import 'package:redoubt/core/ur/ur_api.dart';
+
 import 'sign_request.dart';
 import 'signed_result.dart';
 
@@ -45,6 +47,16 @@ abstract interface class TransactionSigner {
   /// the uncommitted key would be a silent wrong-wallet bug). The unlock
   /// throttle is NOT charged (the PIN was correct; `recordSuccess()` has
   /// already run), and no signature is produced.
+  ///
+  /// Throws [UnsupportedSignRequestFailure] for [SignRequest.dataType]s
+  /// this vault cannot yet correctly decode/digest (`typedData`,
+  /// `personalMessage` — GitHub #28,
+  /// `redoubt-critical-fix-round3` design.md D1/D4). This is a
+  /// crypto-boundary guard, independent of any UI-level block: it fires
+  /// before the vault blob is even unsealed, before [unlockThrottle] is
+  /// charged, and before [AuthService.isSupported] is ever called — so a
+  /// UI bypass can never reach key derivation for a request type this
+  /// vault cannot safely sign.
   Future<SignedResult?> sign(
     SignRequest request, {
     required Uint8List pin,
@@ -66,4 +78,28 @@ class PassphraseMismatchFailure implements Exception {
   String toString() =>
       'PassphraseMismatchFailure: derived address does not match the '
       'vault\'s cached commit-time address';
+}
+
+/// Thrown by [TransactionSigner.sign] when [SignRequest.dataType] is one
+/// this vault cannot yet correctly decode, display, and digest
+/// (`typedData`/`personalMessage` — GitHub #28,
+/// `redoubt-critical-fix-round3` design.md D1/D4: "the guard MUST NOT rely
+/// on the UI alone"). Nothing is signed and no key material is ever
+/// derived when this is thrown — the rejection happens immediately after
+/// the cheap header-only vault-blob pre-check, before the unlock throttle
+/// is charged and before hardware-auth support is even checked, so a UI
+/// bypass can never reach this vault's signing key for a request type it
+/// cannot safely sign. Lifted only once decode, structured display, and
+/// correct digest computation ship together for the affected type (design
+/// .md's "Atomic Unblock Ordering" requirement — no partial unblock).
+class UnsupportedSignRequestFailure implements Exception {
+  const UnsupportedSignRequestFailure(this.dataType);
+
+  /// The rejected [SignRequest.dataType].
+  final EthSignDataType dataType;
+
+  @override
+  String toString() =>
+      'UnsupportedSignRequestFailure: this wallet cannot yet verify '
+      '$dataType requests, so it refuses to sign one';
 }

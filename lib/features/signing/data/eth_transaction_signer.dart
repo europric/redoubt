@@ -103,6 +103,19 @@ class EthTransactionSigner implements TransactionSigner {
     // comment on why this ordering matters.
     VaultBlob.decodeBytes(blob);
 
+    // GitHub #28 fix (redoubt-critical-fix-round3 design.md D1/D4): this
+    // vault cannot yet correctly decode/display/digest typedData or
+    // personalMessage requests (EIP-712/EIP-191 support ships in a later
+    // PR — see design.md's "Atomic Unblock Ordering" requirement). Reject
+    // BEFORE the unlock throttle is charged and BEFORE checking hardware-
+    // auth support — a crypto-boundary guard independent of the review
+    // screen's own block (which a compromised/bypassed UI must never be
+    // able to route around).
+    if (request.dataType == EthSignDataType.typedData ||
+        request.dataType == EthSignDataType.personalMessage) {
+      throw UnsupportedSignRequestFailure(request.dataType);
+    }
+
     // #22 fix (design.md D2): recordAttemptStart() no longer fires merely
     // because a biometric prompt was SHOWN — only once a genuine attempt
     // has resolved (a successful authenticate(), or auth being unsupported
