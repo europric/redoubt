@@ -57,14 +57,18 @@ import 'sign_review_controller.dart';
 ///
 /// **sign-review-redesign (card-based layout)**: the build method now
 /// renders cards grouped by section (Recipient / Amount / Data / Network)
-/// with a type-aware layout. [EthSignDataType.transaction] shows all 4
-/// cards; [EthSignDataType.typedData] and
-/// [EthSignDataType.personalMessage] show a badge + collapsed hex only.
+/// with a type-aware layout. [EthSignDataType.transaction] and
+/// [EthSignDataType.typedTransaction] show all 4 cards.
 ///
-/// **redoubt-critical-fix-round3 (GitHub #28, design.md D5)**: every data
-/// type — including the two above — also shows an origin-disclosure card
-/// (`_OriginCard`) directly below the badge, labeled unverified/
-/// requester-supplied. It is never presented as a confirmed identity.
+/// **redoubt-critical-fix-round3 (GitHub #28, design.md D1/D4/D5)**:
+/// [EthSignDataType.typedData] and [EthSignDataType.personalMessage] are
+/// fail-closed BLOCKED — this wallet cannot yet decode/display/digest
+/// them, so it refuses to sign rather than show an approvable "No data
+/// available" screen. Every data type (including the blocked two) shows
+/// an origin-disclosure card (`_OriginCard`) labeled unverified/
+/// requester-supplied. `EthTransactionSigner.sign()` independently
+/// rejects the same two types at the crypto boundary — this UI block is
+/// defense-in-depth, not the only guard.
 class SignReviewPage extends StatelessWidget {
   const SignReviewPage({
     super.key,
@@ -91,6 +95,12 @@ class SignReviewPage extends StatelessWidget {
         final hasDecodedFields = request.toAddressHex != null ||
             request.valueWei != null ||
             request.dataHex != null;
+        // GitHub #28 (redoubt-critical-fix-round3 design.md D1/D4): this
+        // wallet cannot yet decode/display/digest these two types
+        // (EIP-712/EIP-191 support ships in a later PR) — fail closed
+        // rather than show an approvable "No data available" screen.
+        final isBlocked = request.dataType == EthSignDataType.typedData ||
+            request.dataType == EthSignDataType.personalMessage;
 
         return SecureScreen(
           child: Scaffold(
@@ -106,15 +116,19 @@ class SignReviewPage extends StatelessWidget {
                     const SizedBox(height: 16),
 
                     // Origin disclosure — always shown, on all four data
-                    // types (design.md D5, `signing-request-disclosure`
-                    // spec's "Universal Origin Disclosure" requirement).
-                    // Never a confirmed identity.
+                    // types including the blocked ones (design.md D5,
+                    // `signing-request-disclosure` spec's "Universal Origin
+                    // Disclosure" requirement). Never a confirmed identity.
                     _OriginCard(origin: request.origin),
                     const SizedBox(height: 16),
 
                     // Type-aware layout
-                    if ((request.dataType == EthSignDataType.transaction ||
-                        request.dataType == EthSignDataType.typedTransaction) &&
+                    if (isBlocked) ...[
+                      const _BlockedRequestBody(),
+                    ] else if ((request.dataType ==
+                                EthSignDataType.transaction ||
+                            request.dataType ==
+                                EthSignDataType.typedTransaction) &&
                         hasDecodedFields) ...[
                       _AddressCard(address: request.toAddressHex),
                       const SizedBox(height: 12),
@@ -124,7 +138,9 @@ class SignReviewPage extends StatelessWidget {
                       const SizedBox(height: 12),
                       _ChainCard(chainId: request.chainId),
                     ] else ...[
-                      // typedData / personalMessage — collapsed hex only
+                      // transaction / typedTransaction with an unparsable
+                      // signData — collapsed hex only (best-effort display,
+                      // unaffected by the #28 fix).
                       if (request.dataHex != null)
                         _DataCard(dataHex: request.dataHex),
                       if (request.dataHex == null)
@@ -146,23 +162,35 @@ class SignReviewPage extends StatelessWidget {
                           ),
                         ),
                       ),
-                    FilledButton(
-                      key: const Key('confirmSignButton'),
-                      onPressed:
-                          isLoading ? null : () => onConfirm(controller),
-                      child: isLoading
-                          ? const SizedBox(
-                              height: 16,
-                              width: 16,
-                              child:
-                                  CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Text('Confirm and Sign'),
-                    ),
-                    PassphraseOptInField(
-                      requireConfirmation: false,
-                      onChanged: controller.setPassphrase,
-                    ),
+                    // The confirm button is OMITTED entirely (not merely
+                    // disabled) for blocked types — a disabled button still
+                    // invites retry and remains tappable by automation
+                    // (design.md D4).
+                    if (isBlocked) ...[
+                      OutlinedButton(
+                        key: const Key('backToAccountButton'),
+                        onPressed: () => Navigator.of(context).maybePop(),
+                        child: const Text('Back to account'),
+                      ),
+                    ] else ...[
+                      FilledButton(
+                        key: const Key('confirmSignButton'),
+                        onPressed:
+                            isLoading ? null : () => onConfirm(controller),
+                        child: isLoading
+                            ? const SizedBox(
+                                height: 16,
+                                width: 16,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Text('Confirm and Sign'),
+                      ),
+                      PassphraseOptInField(
+                        requireConfirmation: false,
+                        onChanged: controller.setPassphrase,
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -772,6 +800,47 @@ class _OriginCard extends StatelessWidget {
               fontSize: 11,
               color: Colors.grey[600],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// redoubt-critical-fix-round3 (GitHub #28): Blocked-Request Body
+// ═══════════════════════════════════════════════════════════════
+
+/// Fail-closed block screen for `typedData`/`personalMessage` requests —
+/// this wallet cannot yet decode, display, and digest these types
+/// (design.md's "Atomic Unblock Ordering": all of decode + structured
+/// display + correct digest must ship together before this guard lifts).
+/// Named, actionable copy (design.md D6) — never a generic "unsupported
+/// request type" error. Paired with [SignReviewPage] omitting the confirm
+/// button entirely (not merely disabling it) whenever this is shown.
+class _BlockedRequestBody extends StatelessWidget {
+  const _BlockedRequestBody();
+
+  @override
+  Widget build(BuildContext context) {
+    return _TransactionReviewCard(
+      label: 'Data',
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            "Can't verify this request",
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              color: Theme.of(context).colorScheme.error,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            "This wallet can't yet verify EIP-712 typed-data or "
+            "personal-sign messages, so it won't sign one. Ask the site "
+            'to send a standard transaction instead.',
           ),
         ],
       ),
