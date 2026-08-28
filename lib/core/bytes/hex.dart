@@ -16,7 +16,19 @@ String hexEncode(List<int> bytes) {
 }
 
 /// Decodes a hex string [hex] (case-insensitive, unprefixed) into raw bytes.
+///
+/// Throws [FormatException] on odd-length input (#26) — an odd-length hex
+/// string has no well-defined byte encoding, and silently truncating the
+/// trailing nibble (the previous behavior of `hex.length ~/ 2`) could
+/// misdecode attacker- or corruption-supplied data without any signal.
 Uint8List hexDecode(String hex) {
+  if (hex.length.isOdd) {
+    throw FormatException(
+      'hexDecode: odd-length input (${hex.length} chars) has no '
+      'well-defined byte encoding',
+      hex,
+    );
+  }
   final bytes = Uint8List(hex.length ~/ 2);
   for (var i = 0; i < bytes.length; i++) {
     bytes[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
