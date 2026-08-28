@@ -37,6 +37,7 @@ library;
 import 'dart:typed_data';
 
 import 'package:blockchain_utils/blockchain_utils.dart' hide Mnemonic;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:redoubt/core/bip39/bip39.dart';
 import 'package:redoubt/core/eth/eth.dart';
 import 'package:redoubt/core/security/security.dart';
@@ -53,11 +54,13 @@ class EthTransactionSigner implements TransactionSigner {
     required this.unlockThrottle,
     required this.authService,
     required this.committedAddressSource,
-  });
+    @visibleForTesting Bip39SeedDeriver? seedDeriver,
+  }) : _seedDeriver = seedDeriver ?? deriveBip39SeedInBackground;
 
   final SealedVaultRepository sealedVaultRepository;
   final UnlockThrottle unlockThrottle;
   final AuthService authService;
+  final Bip39SeedDeriver _seedDeriver;
 
   /// The commit-time committed address this vault's address is checked
   /// against on every sign (design.md D5 — required, not nullable: "a
@@ -202,21 +205,35 @@ class EthTransactionSigner implements TransactionSigner {
   ///
   /// [language] is read from the opened vault's [VaultSecret] (D8/D9) —
   /// never supplied by the UI, never defaulted here.
+  ///
+  /// **Seed zeroization (#25, design.md D4)**: the intermediate 64-byte
+  /// BIP-39 seed is zero-filled in a `finally` block before this method
+  /// returns — on success AND on any error thrown from the derivation
+  /// chain — so no copy of it survives past this call. Safe because
+  /// `Bip32Base.fromSeed` copies the seed via `asImmutableBytes` (no
+  /// aliasing) and [_seedDeriver] (`compute` by default) returns a fresh,
+  /// isolate-transferred buffer this method exclusively owns. The derived
+  /// private key itself remains unzeroizable (`final BigInt
+  /// secretMultiplier`) — an accepted, documented residual limitation.
   Future<Bip44> _addressLevelKey(
     Uint8List entropy, {
     required MnemonicLanguage language,
     Uint8List? passphraseUtf8,
   }) async {
-    final seed = await deriveBip39SeedInBackground(
+    final seed = await _seedDeriver(
       entropy,
       language: language,
       passphraseUtf8: passphraseUtf8,
     );
-    final master = Bip44.fromSeed(seed, Bip44Coins.ethereum);
-    return master.purpose.coin
-        .account(0)
-        .change(Bip44Changes.chainExt)
-        .addressIndex(0);
+    try {
+      final master = Bip44.fromSeed(seed, Bip44Coins.ethereum);
+      return master.purpose.coin
+          .account(0)
+          .change(Bip44Changes.chainExt)
+          .addressIndex(0);
+    } finally {
+      seed.fillRange(0, seed.length, 0);
+    }
   }
 }
 
