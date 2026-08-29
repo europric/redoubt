@@ -167,6 +167,15 @@ class SignReviewPage extends StatelessWidget {
                       const SizedBox(height: 12),
                       _ValueCard(wei: request.valueWei),
                       const SizedBox(height: 12),
+                      _GasCard(
+                        nonceValue: request.nonceValue,
+                        gasLimit: request.gasLimit,
+                        gasPriceWei: request.gasPriceWei,
+                        maxFeePerGasWei: request.maxFeePerGasWei,
+                        maxPriorityFeePerGasWei:
+                            request.maxPriorityFeePerGasWei,
+                      ),
+                      const SizedBox(height: 12),
                       _DataCard(dataHex: request.dataHex),
                       const SizedBox(height: 12),
                       _ChainCard(chainId: request.chainId),
@@ -587,6 +596,40 @@ String formatEth(BigInt? wei) {
     // Integer part is zero — show first 6 significant digits
     final trimmed = fracStr.substring(0, 6).replaceAll(RegExp(r'0+$'), '');
     return '0.$trimmed ETH';
+  }
+}
+
+/// Formats a wei value as a human-readable Gwei string (GitHub #48).
+/// Mirrors [formatEth]'s exact structure one unit down (`÷ 10^9` instead of
+/// `÷ 10^18`) — same truncate/pad/trim shape, never rounds.
+/// - `null` → `'Unknown'`
+/// - `0` → `'0 Gwei'`
+/// - `< 0.000001 Gwei` (< 10^3 wei) → `'< 0.000001 Gwei'`
+/// - Otherwise → `'{amount} Gwei'` with up to 6 decimal places.
+@visibleForTesting
+String formatGwei(BigInt? wei) {
+  if (wei == null) return 'Unknown';
+  if (wei == BigInt.zero) return '0 Gwei';
+
+  final oneGwei = BigInt.from(10).pow(9);
+  final dustThreshold = BigInt.from(10).pow(3);
+  if (wei < dustThreshold) return '< 0.000001 Gwei';
+
+  final integerPart = wei ~/ oneGwei;
+  final fractionalPart = wei % oneGwei;
+
+  // Left-pad the fraction to 9 digits
+  final fracStr = fractionalPart.toString().padLeft(9, '0');
+
+  if (integerPart > BigInt.zero) {
+    // Show up to 6 decimal places, trim trailing zeros
+    final trimmed = fracStr.substring(0, 6).replaceAll(RegExp(r'0+$'), '');
+    final display = trimmed.isEmpty ? '' : '.$trimmed';
+    return '$integerPart$display Gwei';
+  } else {
+    // Integer part is zero — show first 6 significant digits
+    final trimmed = fracStr.substring(0, 6).replaceAll(RegExp(r'0+$'), '');
+    return '0.$trimmed Gwei';
   }
 }
 
@@ -1077,6 +1120,186 @@ class _ValueCard extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// GitHub #48: Gas / Network Fee Card
+// ═══════════════════════════════════════════════════════════════
+
+/// Displays the decoded gas parameters — nonce, gas limit, per-unit price
+/// field(s), and a computed total-fee row — for a fully decoded
+/// transaction/typedTransaction request (`SignRequest.hasDecodedSummary`
+/// gates this card exactly as it gates [_AddressCard]/[_ValueCard]/
+/// [_DataCard]). One class, conditional internal rows (mirrors [_DataCard]'s
+/// precedent) rather than a legacy/EIP-1559 widget split — the two
+/// price-model branches share the nonce/gas-limit rows and the "Gwei
+/// primary + wei secondary" row shape (design.md D7).
+///
+/// Price fields (`gasPrice`/`maxFeePerGas`/`maxPriorityFeePerGas`) render
+/// Gwei-primary + wei-secondary, one unit down from [_ValueCard]'s ETH+wei
+/// pattern (design.md's "Dual-Unit Display" requirement). The total-fee row
+/// is the one exception: it renders ETH+wei, NOT Gwei+wei, because it is an
+/// absolute amount leaving the wallet — directly comparable to
+/// [_ValueCard]'s Amount row (design.md D5). `nonce`/`gasLimit` render as
+/// plain integers with no unit conversion.
+class _GasCard extends StatelessWidget {
+  const _GasCard({
+    required this.nonceValue,
+    required this.gasLimit,
+    required this.gasPriceWei,
+    required this.maxFeePerGasWei,
+    required this.maxPriorityFeePerGasWei,
+  });
+
+  final BigInt? nonceValue;
+  final BigInt? gasLimit;
+  final BigInt? gasPriceWei;
+  final BigInt? maxFeePerGasWei;
+  final BigInt? maxPriorityFeePerGasWei;
+
+  @override
+  Widget build(BuildContext context) {
+    // EIP-1559 iff a maxFeePerGas is present — hasDecodedSummary already
+    // guarantees exactly one complete price model when this card renders.
+    final isEip1559 = maxFeePerGasWei != null;
+    final totalFeeWei = isEip1559
+        ? (gasLimit != null && maxFeePerGasWei != null
+              ? gasLimit! * maxFeePerGasWei!
+              : null)
+        : (gasLimit != null && gasPriceWei != null
+              ? gasLimit! * gasPriceWei!
+              : null);
+    // Legacy/EIP-2930: exact, fixed at broadcast time. EIP-1559: an upper
+    // bound only — this air-gapped wallet has no chain-state access to the
+    // real base fee at inclusion time, so it never fabricates an
+    // "expected"/estimated fee (design.md D5).
+    final totalFeeLabel = isEip1559 ? 'Max total fee' : 'Total fee';
+
+    return _TransactionReviewCard(
+      label: 'Network fee',
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _GasIntRow(label: 'Nonce', value: nonceValue),
+          const SizedBox(height: 8),
+          _GasIntRow(label: 'Gas limit', value: gasLimit),
+          const SizedBox(height: 8),
+          if (!isEip1559) ...[
+            _GasPriceRow(label: 'Gas price', wei: gasPriceWei),
+            const SizedBox(height: 8),
+          ] else ...[
+            _GasPriceRow(
+              label: 'Max priority fee',
+              wei: maxPriorityFeePerGasWei,
+            ),
+            const SizedBox(height: 8),
+            _GasPriceRow(label: 'Max fee', wei: maxFeePerGasWei),
+            const SizedBox(height: 8),
+          ],
+          _TotalFeeRow(label: totalFeeLabel, wei: totalFeeWei),
+        ],
+      ),
+    );
+  }
+}
+
+/// A plain-integer gas row (nonce/gasLimit) — no unit conversion, no
+/// secondary line (spec's "Dual-Unit Display for Gas Price Fields"
+/// requirement explicitly excludes these two fields).
+class _GasIntRow extends StatelessWidget {
+  const _GasIntRow({required this.label, required this.value});
+
+  final String label;
+  final BigInt? value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 90,
+          child: Text(
+            label,
+            style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value?.toString() ?? 'Unknown',
+            style: const TextStyle(fontSize: 14),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A per-unit gas price row — Gwei primary line, wei secondary line
+/// (matches [_ValueCard]'s ETH+wei shape, one unit down).
+class _GasPriceRow extends StatelessWidget {
+  const _GasPriceRow({required this.label, required this.wei});
+
+  final String label;
+  final BigInt? wei;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+        ),
+        Text(
+          formatGwei(wei),
+          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+        ),
+        Text(
+          formatWei(wei),
+          style: TextStyle(
+            fontSize: 12,
+            color: Theme.of(context).textTheme.bodySmall?.color,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// The computed total-fee row — ETH primary line, wei secondary line
+/// (design.md D5: an absolute amount leaving the wallet, comparable to
+/// [_ValueCard]'s Amount row, NOT a per-unit price).
+class _TotalFeeRow extends StatelessWidget {
+  const _TotalFeeRow({required this.label, required this.wei});
+
+  final String label;
+  final BigInt? wei;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+        ),
+        Text(
+          formatEth(wei),
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+        ),
+        Text(
+          formatWei(wei),
+          style: TextStyle(
+            fontSize: 12,
+            color: Theme.of(context).textTheme.bodySmall?.color,
+          ),
+        ),
+      ],
     );
   }
 }
