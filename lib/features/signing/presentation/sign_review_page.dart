@@ -69,6 +69,15 @@ import 'sign_review_controller.dart';
 /// requester-supplied. `EthTransactionSigner.sign()` independently
 /// rejects the same two types at the crypto boundary — this UI block is
 /// defense-in-depth, not the only guard.
+///
+/// **redoubt-critical-fix-round4 (GitHub #18, design.md D1/D2/D4)**: the
+/// 4-card structured layout for [EthSignDataType.transaction] and
+/// [EthSignDataType.typedTransaction] renders if-and-only-if `SignRequest.
+/// hasDecodedSummary` is true — a partial RLP decode (one field null while
+/// another decoded) falls to [_UndecodableTransactionBody] instead of a
+/// complete-looking summary with an "Unknown" card standing in for
+/// tampered/malformed data. Unlike the #28 block above, this stays
+/// signable — it is a display-honesty gap, not a signing-correctness one.
 class SignReviewPage extends StatelessWidget {
   const SignReviewPage({
     super.key,
@@ -92,9 +101,15 @@ class SignReviewPage extends StatelessWidget {
         final request = controller.request;
         final errorMessage = controller.state.errorOrNull;
         final isLoading = controller.state.isLoading;
-        final hasDecodedFields = request.toAddressHex != null ||
-            request.valueWei != null ||
-            request.dataHex != null;
+        // GitHub #18 (redoubt-critical-fix-round4 design.md D4): whether
+        // this request is one of the two RLP-decodable data types. Hoisted
+        // and named so the structured-layout gate below is explicit and
+        // if-and-only-if, rather than relying on today's reachability
+        // proof implicitly — a future 5th `EthSignDataType` must not
+        // silently inherit the "could not be fully decoded" message.
+        final isTransactionLike =
+            request.dataType == EthSignDataType.transaction ||
+                request.dataType == EthSignDataType.typedTransaction;
         // GitHub #28 PR2 (redoubt-critical-fix-round3 design.md D1/D3,
         // "Atomic Unblock Ordering"): the guard is now CONDITIONAL on
         // D1's decode-as-proof step succeeding, not unconditional on
@@ -146,11 +161,8 @@ class SignReviewPage extends StatelessWidget {
                       _PersonalMessageCard(message: decodedPersonalMessage),
                     ] else if (decodedTypedData != null) ...[
                       _TypedDataCard(typedData: decodedTypedData),
-                    ] else if ((request.dataType ==
-                                EthSignDataType.transaction ||
-                            request.dataType ==
-                                EthSignDataType.typedTransaction) &&
-                        hasDecodedFields) ...[
+                    ] else if (isTransactionLike &&
+                        request.hasDecodedSummary) ...[
                       _AddressCard(address: request.toAddressHex),
                       const SizedBox(height: 12),
                       _ValueCard(wei: request.valueWei),
@@ -158,17 +170,23 @@ class SignReviewPage extends StatelessWidget {
                       _DataCard(dataHex: request.dataHex),
                       const SizedBox(height: 12),
                       _ChainCard(chainId: request.chainId),
+                    ] else if (isTransactionLike) ...[
+                      // transaction / typedTransaction whose RLP summary
+                      // decode was partial or fully failed (GitHub #18):
+                      // never render a complete-looking summary around a
+                      // corrupted/unparsable payload — fall back with an
+                      // explicit message. Still signable (unlike #28's
+                      // fail-closed block above) — this is a display-
+                      // honesty gap, not a signing-correctness one.
+                      const _UndecodableTransactionBody(),
                     ] else ...[
-                      // transaction / typedTransaction with an unparsable
-                      // signData — collapsed hex only (best-effort display,
-                      // unaffected by the #28 fix).
-                      if (request.dataHex != null)
-                        _DataCard(dataHex: request.dataHex),
-                      if (request.dataHex == null)
-                        const _TransactionReviewCard(
-                          label: 'Data',
-                          content: Text('No data available'),
-                        ),
+                      // Genuine catch-all for any other reachable data
+                      // type — none exist today (see design.md's
+                      // reachability proof), kept for forward safety.
+                      const _TransactionReviewCard(
+                        label: 'Data',
+                        content: Text('No data available'),
+                      ),
                     ],
 
                     const SizedBox(height: 24),
@@ -862,6 +880,46 @@ class _BlockedRequestBody extends StatelessWidget {
             "This wallet can't yet verify EIP-712 typed-data or "
             "personal-sign messages, so it won't sign one. Ask the site "
             'to send a standard transaction instead.',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// redoubt-critical-fix-round4 (GitHub #18): Undecodable-Transaction Body
+// ═══════════════════════════════════════════════════════════════
+
+/// Fallback shown for a `transaction`/`typedTransaction` request whose RLP
+/// summary decode was partial or fully failed (`SignRequest.
+/// hasDecodedSummary` is `false`) — deliberately NOT error-colored, unlike
+/// [_BlockedRequestBody]: this is signable, not blocked (design.md D6/D7).
+/// Modeled on [_BlockedRequestBody]'s layout but with distinct, non-error
+/// copy so the two states stay visually and structurally separable.
+class _UndecodableTransactionBody extends StatelessWidget {
+  const _UndecodableTransactionBody();
+
+  @override
+  Widget build(BuildContext context) {
+    return const _TransactionReviewCard(
+      label: 'Data',
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            "Couldn't fully decode this transaction",
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          SizedBox(height: 8),
+          Text(
+            'This wallet could not read the recipient, amount and data '
+            'fields from this request, so it is showing none of them '
+            'rather than a partial summary. Only sign it if you can '
+            'verify the request another way.',
           ),
         ],
       ),
