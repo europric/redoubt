@@ -103,18 +103,20 @@ class EthTransactionSigner implements TransactionSigner {
     // comment on why this ordering matters.
     VaultBlob.decodeBytes(blob);
 
-    // GitHub #28 fix (redoubt-critical-fix-round3 design.md D1/D4): this
-    // vault cannot yet correctly decode/display/digest typedData or
-    // personalMessage requests (EIP-712/EIP-191 support ships in a later
-    // PR — see design.md's "Atomic Unblock Ordering" requirement). Reject
-    // BEFORE the unlock throttle is charged and BEFORE checking hardware-
-    // auth support — a crypto-boundary guard independent of the review
-    // screen's own block (which a compromised/bypassed UI must never be
-    // able to route around).
-    if (request.dataType == EthSignDataType.typedData ||
-        request.dataType == EthSignDataType.personalMessage) {
-      throw UnsupportedSignRequestFailure(request.dataType);
-    }
+    // GitHub #28 fix, PR2 (redoubt-critical-fix-round3 design.md D1/D2):
+    // the digest is computed HERE, via the single named `signingDigestFor`
+    // seam (D2) — BEFORE the unlock throttle is charged, BEFORE checking
+    // hardware-auth support, and BEFORE any key material is derived. For
+    // `typedData`/`personalMessage`, this seam PROVES the wire-shape
+    // assumption via decode-as-proof (D1) before returning a digest: a
+    // decode failure throws [UnsupportedSignRequestFailure] right here,
+    // so this vault never reaches the KDF or derives a private key for a
+    // request it cannot correctly digest. This crypto-boundary guard is
+    // independent of the review screen's own block (which a compromised/
+    // bypassed UI must never be able to route around) — PR1's
+    // unconditional guard is now conditional on decode success (design.md's
+    // "Atomic Unblock Ordering" requirement).
+    final hash = signingDigestFor(request);
 
     // #22 fix (design.md D2): recordAttemptStart() no longer fires merely
     // because a biometric prompt was SHOWN — only once a genuine attempt
@@ -189,7 +191,6 @@ class EthTransactionSigner implements TransactionSigner {
 
       privateKeyBytes = Uint8List.fromList(addressKey.bip32.privateKey.raw);
 
-      final hash = keccak256(request.signData);
       final signature = signHash(privateKeyBytes, hash);
       final chainId = request.chainId;
       // Typed transactions (EIP-2930/EIP-1559, EthSignDataType.typedTransaction)
@@ -282,4 +283,40 @@ Uint8List _bigIntTo32Bytes(BigInt value) {
     bytes[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
   }
   return bytes;
+}
+
+/// The single named digest seam (GitHub #28, redoubt-critical-fix-round3
+/// design.md D2): every `dataType`'s signing digest is computed HERE, and
+/// only here. Pure and key-free — no vault/KDF/key material involved.
+///
+/// - `transaction`/`typedTransaction`: `keccak256(request.signData)`,
+///   UNCHANGED from the pre-#28 behavior (golden-vector non-regression —
+///   design.md's "Golden Vector Non-Regression" requirement).
+/// - `personalMessage`/`typedData`: delegates to [eip191Digest]/
+///   [eip712Digest], which themselves perform design.md D1's
+///   decode-as-proof step ([decodePersonalMessage]/[decodeTypedData])
+///   before computing a digest. A decode failure — the wire-shape
+///   assumption not holding for THIS request — is rethrown here as
+///   [UnsupportedSignRequestFailure], the SAME exception type PR1's
+///   guard threw, so every caller (including [sign]'s own doc comment)
+///   keeps treating this as one uniform fail-closed boundary.
+@visibleForTesting
+Uint8List signingDigestFor(SignRequest request) {
+  switch (request.dataType) {
+    case EthSignDataType.transaction:
+    case EthSignDataType.typedTransaction:
+      return keccak256(request.signData);
+    case EthSignDataType.personalMessage:
+      try {
+        return eip191Digest(request.signData);
+      } on FormatException {
+        throw UnsupportedSignRequestFailure(request.dataType);
+      }
+    case EthSignDataType.typedData:
+      try {
+        return eip712Digest(decodeTypedData(request.signData));
+      } on Eip712UnsupportedException {
+        throw UnsupportedSignRequestFailure(request.dataType);
+      }
+  }
 }

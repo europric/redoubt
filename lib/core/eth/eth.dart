@@ -3,6 +3,8 @@
 library;
 
 export 'bip39_seed.dart';
+export 'eip191.dart';
 export 'eip55.dart';
+export 'eip712.dart';
 export 'rlp.dart';
 export 'signing.dart';
