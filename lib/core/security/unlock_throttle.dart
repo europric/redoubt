@@ -186,6 +186,13 @@ class FlutterUnlockThrottle implements UnlockThrottle {
   /// decision): `delay(n) = 0 for n<=2; min(1s * 5^(n-3), 15min) for n>=3`.
   static Duration delayForFailedAttempts(int failedAttempts) {
     if (failedAttempts <= 2) return Duration.zero;
+    // #19 crash-vector fix: return the cap directly for n >= 8 before
+    // `math.pow` ever runs -- a tampered-then-defaulted or otherwise huge
+    // `failedAttempts` (e.g. 500) previously overflowed into
+    // `UnsupportedError` inside `.toInt()`. 5^5 == 3125 > 900s, so this is
+    // already always >= the cap for n >= 8: purely an early return, not a
+    // behavior change for any value below it.
+    if (failedAttempts >= 8) return const Duration(seconds: _capSeconds);
     final seconds = math.pow(5, failedAttempts - 3).toInt();
     return Duration(seconds: math.min(seconds, _capSeconds));
   }
