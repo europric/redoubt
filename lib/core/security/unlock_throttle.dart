@@ -3,11 +3,11 @@
 /// "Exponential Backoff On Failed Attempts, Never Auto-Wipe" requirement;
 /// design.md's "UnlockThrottle design" decision).
 ///
-/// **Standalone in this PR**: no caller wires this class into
-/// `VaultCipher`/`VaultCommitService`/any unlock UI yet (that lands in
-/// PR7, gated on the Phase 9 device benchmark). This file only has to be
-/// correct in isolation -- its own state machine and persistence. A future
-/// caller would use it as:
+/// **Live at six call sites**: this class is wired into production and
+/// gates every app unlock and signing attempt --
+/// `lib/config/vault_scope.dart:105`, `lib/config/vault_wipe_service.dart:53`,
+/// `AppUnlockController`, `PinEntryPage`, `EthTransactionSigner`, and
+/// `VaultResetController`. A caller uses it as:
 /// ```dart
 /// final remaining = await throttle.remainingDelay();
 /// if (remaining > Duration.zero) { /* block submit, show countdown */ }
@@ -23,9 +23,24 @@
 ///   // for a structurally broken blob" (design.md's failure-classification
 ///   // decision) would call recordAttemptStart() only AFTER confirming the
 ///   // header parses with a known version, or would explicitly not treat
-///   // this branch as chargeable. Left to the PR7 caller.
+///   // this branch as chargeable.
 /// }
 /// ```
+///
+/// **Integrity + total read path (#19)**: the persisted record carries a
+/// SHA-256 digest (`package:crypto`) computed over the canonical string
+/// `"v1|N|M"` (parsed ints, never re-serialized JSON -- key order is not a
+/// stable contract). The read path (`_decodeStoredState`) is total over
+/// ANY stored bytes: malformed JSON, wrong-type fields, a negative count,
+/// an out-of-range timestamp, or a digest mismatch all resolve to a safe
+/// default (`{failedAttempts: 8, lastAttemptAtMs: now}` -- already at the
+/// 15-minute cap, never a permanent lockout) instead of throwing. A
+/// pre-existing well-formed record with no `digest` key is trusted as
+/// legacy state and silently upgraded, not treated as tampered. This is
+/// tamper-EVIDENCE, not tamper-proofing: an attacker with delete access to
+/// the underlying secure-storage key already resets the counter to zero
+/// for free, with or without this digest -- a documented, accepted scope
+/// boundary, not an oversight.
 ///
 /// **Closed-form backoff schedule** (design.md):
 /// `delay(n) = 0 for n<=2; min(1s * 5^(n-3), 15min) for n>=3` -->
@@ -65,6 +80,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 /// The fakeable boundary over vault unlock throttling.
@@ -103,6 +119,14 @@ abstract interface class UnlockThrottle {
 class FlutterUnlockThrottle implements UnlockThrottle {
   static const _key = 'vault.unlock.throttle';
   static const _capSeconds = 15 * 60;
+
+  /// Inclusive bound of `DateTime.fromMillisecondsSinceEpoch`'s
+  /// representable range on the pinned Dart SDK (verified against Dart
+  /// 3.13.0 at apply time: `-8640000000000000..8640000000000000`, ~100M
+  /// days either side of the epoch). Any stored `lastAttemptAtMs` outside
+  /// `0..8640000000000000` is treated as corrupt (#19) -- rejected BEFORE
+  /// `DateTime.fromMillisecondsSinceEpoch` is ever called with it.
+  static const _maxEpochMs = 8640000000000000;
 
   /// #27 TOCTOU fix (design.md D3): class-level (not per-instance) tail
   /// that serializes read-modify-write access to the single
@@ -162,19 +186,35 @@ class FlutterUnlockThrottle implements UnlockThrottle {
   /// decision): `delay(n) = 0 for n<=2; min(1s * 5^(n-3), 15min) for n>=3`.
   static Duration delayForFailedAttempts(int failedAttempts) {
     if (failedAttempts <= 2) return Duration.zero;
+    // #19 crash-vector fix: return the cap directly for n >= 8 before
+    // `math.pow` ever runs -- a tampered-then-defaulted or otherwise huge
+    // `failedAttempts` (e.g. 500) previously overflowed into
+    // `UnsupportedError` inside `.toInt()`. 5^5 == 3125 > 900s, so this is
+    // already always >= the cap for n >= 8: purely an early return, not a
+    // behavior change for any value below it.
+    if (failedAttempts >= 8) return const Duration(seconds: _capSeconds);
     final seconds = math.pow(5, failedAttempts - 3).toInt();
     return Duration(seconds: math.min(seconds, _capSeconds));
   }
 
   @override
-  Future<int> failedAttempts() async => (await _readState()).failedAttempts;
+  Future<int> failedAttempts() async =>
+      (await _readStateRepairingIfNeeded()).failedAttempts;
 
   @override
   Future<void> recordAttemptStart() => _serialized(() async {
-    final state = await _readState();
+    // #19 (design.md D1): uses the pure, non-serializing decode directly --
+    // never `_readStateRepairingIfNeeded`, which may itself re-enter the
+    // class-level critical section below and would deadlock by waiting on
+    // the very action it is called from. Any `needsPersist` repair signal
+    // is deliberately ignored: this call's own write below already emits a
+    // correctly-digested record built on top of the decoded (possibly
+    // safe-default) state, so the repair is subsumed for free with zero
+    // extra writes.
+    final outcome = await _decodeStoredState();
     await _writeState(
       _ThrottleState(
-        failedAttempts: state.failedAttempts + 1,
+        failedAttempts: outcome.state.failedAttempts + 1,
         lastAttemptAtMs: _now().millisecondsSinceEpoch,
       ),
     );
@@ -187,7 +227,9 @@ class FlutterUnlockThrottle implements UnlockThrottle {
 
   @override
   Future<Duration> remainingDelay() async {
-    final state = await _readState();
+    // #19: never called from inside a running critical-section action, so
+    // the possibly-persisting repair path is safe to use here.
+    final state = await _readStateRepairingIfNeeded();
     if (state.failedAttempts == 0) return Duration.zero;
 
     final delay = delayForFailedAttempts(state.failedAttempts);
@@ -211,23 +253,122 @@ class FlutterUnlockThrottle implements UnlockThrottle {
   @override
   Future<void> clearThrottleState() => _serialized(() => _storage.delete(key: _key));
 
-  Future<_ThrottleState> _readState() async {
+  /// #19 (design.md D1): pure, in-chain-safe read+decode. Reads the raw
+  /// bytes then hands off to the fully synchronous, total [_decode] --
+  /// this function itself never enters the class-level critical section,
+  /// so it is the only read helper safe to call from inside a running
+  /// critical-section action (i.e. from [recordAttemptStart]) without
+  /// risking re-entrant deadlock.
+  Future<_ReadOutcome> _decodeStoredState() async {
     final raw = await _storage.read(key: _key);
-    if (raw == null) {
-      return const _ThrottleState(failedAttempts: 0, lastAttemptAtMs: 0);
+    return _decode(raw);
+  }
+
+  /// #19 (design.md D1): the ONLY read helper that may persist a repair,
+  /// by entering the critical section below. Used ONLY by
+  /// [failedAttempts] and [remainingDelay] -- the two public methods that
+  /// are NEVER invoked from inside a running critical-section action, so
+  /// entering it here cannot deadlock. Re-decodes a SECOND time INSIDE the
+  /// critical section (rather than trusting the first, pre-critical-
+  /// section read) so a stale read taken before entering cannot clobber a
+  /// concurrent [recordSuccess]'s write with a stale repair.
+  Future<_ThrottleState> _readStateRepairingIfNeeded() async {
+    final first = await _decodeStoredState();
+    if (!first.needsPersist) return first.state;
+    try {
+      return await _serialized(() async {
+        final fresh = await _decodeStoredState();
+        if (!fresh.needsPersist) return fresh.state;
+        await _writeState(fresh.state);
+        return fresh.state;
+      });
+    } catch (_) {
+      // A persist failure here must not break the read path itself --
+      // the caller still gets a usable (if unpersisted) safe value.
+      return first.state;
     }
-    final map = jsonDecode(raw) as Map<String, dynamic>;
-    return _ThrottleState(
-      failedAttempts: map['failedAttempts'] as int,
-      lastAttemptAtMs: map['lastAttemptAtMs'] as int,
+  }
+
+  /// #19 (design.md D3): pure, synchronous, TOTAL decision tree over raw
+  /// stored bytes. Never throws, never awaits, never enters the critical
+  /// section. Every branch below terminates.
+  _ReadOutcome _decode(String? raw) {
+    if (raw == null) {
+      return const _ReadOutcome(
+        state: _ThrottleState(failedAttempts: 0, lastAttemptAtMs: 0),
+        needsPersist: false,
+      );
+    }
+
+    Map<String, dynamic>? map;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) map = decoded;
+    } catch (_) {
+      map = null;
+    }
+    if (map == null) return _repair();
+
+    final failedAttemptsRaw = map['failedAttempts'];
+    final lastAttemptAtMsRaw = map['lastAttemptAtMs'];
+    if (failedAttemptsRaw is! int || lastAttemptAtMsRaw is! int) {
+      return _repair();
+    }
+    if (failedAttemptsRaw < 0) return _repair();
+    if (lastAttemptAtMsRaw < 0 || lastAttemptAtMsRaw > _maxEpochMs) {
+      return _repair();
+    }
+
+    if (!map.containsKey('digest')) {
+      // Legacy record predating this change: trusted as-is, silently
+      // upgraded with a digest on next persist -- never penalized.
+      return _ReadOutcome(
+        state: _ThrottleState(
+          failedAttempts: failedAttemptsRaw,
+          lastAttemptAtMs: lastAttemptAtMsRaw,
+        ),
+        needsPersist: true,
+      );
+    }
+
+    final digestRaw = map['digest'];
+    if (digestRaw is! String) return _repair();
+    if (digestRaw.toLowerCase() !=
+        _digestFor(failedAttemptsRaw, lastAttemptAtMsRaw)) {
+      return _repair();
+    }
+
+    return _ReadOutcome(
+      state: _ThrottleState(
+        failedAttempts: failedAttemptsRaw,
+        lastAttemptAtMs: lastAttemptAtMsRaw,
+      ),
+      needsPersist: false,
     );
   }
+
+  _ReadOutcome _repair() => _ReadOutcome(
+    state: _ThrottleState(
+      failedAttempts: 8,
+      lastAttemptAtMs: _now().millisecondsSinceEpoch,
+    ),
+    needsPersist: true,
+  );
+
+  /// #19 (design.md D2): SHA-256 (`package:crypto`, synchronous -- same
+  /// precedent as `lib/core/ur/xoshiro256.dart`) over the canonical string
+  /// `"v1|N|M"`, built from parsed ints -- NEVER over re-serialized JSON,
+  /// whose key order is not a stable contract.
+  static String _digestFor(int failedAttempts, int lastAttemptAtMs) =>
+      sha256.convert(utf8.encode('v1|$failedAttempts|$lastAttemptAtMs')).toString();
 
   Future<void> _writeState(_ThrottleState state) => _storage.write(
     key: _key,
     value: jsonEncode({
+      'v': 1,
       'failedAttempts': state.failedAttempts,
       'lastAttemptAtMs': state.lastAttemptAtMs,
+      'digest': _digestFor(state.failedAttempts, state.lastAttemptAtMs),
     }),
   );
 }
@@ -240,4 +381,13 @@ class _ThrottleState {
 
   final int failedAttempts;
   final int lastAttemptAtMs;
+}
+
+/// #19 (design.md D1): result of [FlutterUnlockThrottle._decode] -- the
+/// decoded/repaired state, plus whether a repair still needs persisting.
+class _ReadOutcome {
+  const _ReadOutcome({required this.state, required this.needsPersist});
+
+  final _ThrottleState state;
+  final bool needsPersist;
 }
