@@ -95,12 +95,29 @@ class SignReviewPage extends StatelessWidget {
         final hasDecodedFields = request.toAddressHex != null ||
             request.valueWei != null ||
             request.dataHex != null;
-        // GitHub #28 (redoubt-critical-fix-round3 design.md D1/D4): this
-        // wallet cannot yet decode/display/digest these two types
-        // (EIP-712/EIP-191 support ships in a later PR) — fail closed
-        // rather than show an approvable "No data available" screen.
-        final isBlocked = request.dataType == EthSignDataType.typedData ||
-            request.dataType == EthSignDataType.personalMessage;
+        // GitHub #28 PR2 (redoubt-critical-fix-round3 design.md D1/D3,
+        // "Atomic Unblock Ordering"): the guard is now CONDITIONAL on
+        // D1's decode-as-proof step succeeding, not unconditional on
+        // dataType. A successful decode both lifts the guard AND supplies
+        // the exact content this branch renders below — decode, display,
+        // and (via `signingDigestFor`, `eth_transaction_signer.dart`)
+        // correct digest computation all ship together, never partially.
+        String? decodedPersonalMessage;
+        Map<String, dynamic>? decodedTypedData;
+        var isBlocked = false;
+        if (request.dataType == EthSignDataType.personalMessage) {
+          try {
+            decodedPersonalMessage = decodePersonalMessage(request.signData);
+          } on FormatException {
+            isBlocked = true;
+          }
+        } else if (request.dataType == EthSignDataType.typedData) {
+          try {
+            decodedTypedData = decodeTypedData(request.signData);
+          } on Eip712UnsupportedException {
+            isBlocked = true;
+          }
+        }
 
         return SecureScreen(
           child: Scaffold(
@@ -125,6 +142,10 @@ class SignReviewPage extends StatelessWidget {
                     // Type-aware layout
                     if (isBlocked) ...[
                       const _BlockedRequestBody(),
+                    ] else if (decodedPersonalMessage != null) ...[
+                      _PersonalMessageCard(message: decodedPersonalMessage),
+                    ] else if (decodedTypedData != null) ...[
+                      _TypedDataCard(typedData: decodedTypedData),
                     ] else if ((request.dataType ==
                                 EthSignDataType.transaction ||
                             request.dataType ==
@@ -842,6 +863,78 @@ class _BlockedRequestBody extends StatelessWidget {
             "personal-sign messages, so it won't sign one. Ask the site "
             'to send a standard transaction instead.',
           ),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// redoubt-critical-fix-round3 PR2 (GitHub #28): Structured decoded
+// content for personalMessage / typedData — shown ONLY once design.md
+// D1's decode-as-proof step has already succeeded (never a fallback for
+// undecodable content, which stays on `_BlockedRequestBody` above).
+// ═══════════════════════════════════════════════════════════════
+
+/// Displays the decoded EIP-191 personal-sign message as plain text — the
+/// actual content, never a hex blob (spec's "Structured Review Content"
+/// requirement).
+class _PersonalMessageCard extends StatelessWidget {
+  const _PersonalMessageCard({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return _TransactionReviewCard(
+      label: 'Message',
+      content: SelectableText(
+        message,
+        style: const TextStyle(fontSize: 14),
+      ),
+    );
+  }
+}
+
+/// Displays a decoded EIP-712 typed-data struct as a flat list of field
+/// rows (design.md D3's rendering-DoS defence — [flattenTypedData] always
+/// returns an already-bounded flat list; this widget builds a flat
+/// `Column`, NEVER a recursive widget tree, no matter how deep [FlatRow.
+/// indent] varies).
+class _TypedDataCard extends StatelessWidget {
+  const _TypedDataCard({required this.typedData});
+
+  final Map<String, dynamic> typedData;
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = flattenTypedData(typedData);
+    return _TransactionReviewCard(
+      label: 'Message',
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final row in rows)
+            Padding(
+              padding: EdgeInsets.only(
+                left: (row.indent * 12).toDouble(),
+                bottom: 4,
+              ),
+              child: Text.rich(
+                TextSpan(
+                  style: DefaultTextStyle.of(context).style.copyWith(
+                        fontSize: 13,
+                      ),
+                  children: [
+                    TextSpan(
+                      text: '${row.label}: ',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    TextSpan(text: row.value),
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
     );
