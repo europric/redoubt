@@ -37,6 +37,10 @@ class SignRequest {
   /// A hand-built [SignRequest] via the public `const` constructor below is
   /// NOT covered by that guarantee (design.md D3) — [hasDecodedSummary]
   /// reports the true per-instance state regardless of how it was built.
+  ///
+  /// GitHub #48: the atomic outcome now also covers [nonceValue],
+  /// [gasLimit], and the active transaction type's gas price field(s) — see
+  /// those fields' docs and [hasDecodedSummary].
   final String? toAddressHex;
 
   /// The RLP-decoded `value` field, in wei, under the same conditions as
@@ -47,6 +51,34 @@ class SignRequest {
   /// conditions as [toAddressHex].
   final String? dataHex;
 
+  /// The RLP-decoded `nonce` field, under the same all-or-nothing
+  /// conditions as [toAddressHex]. Set for every recognized transaction
+  /// type (GitHub #48).
+  final BigInt? nonceValue;
+
+  /// The RLP-decoded `gasLimit` field — a dimensionless gas-unit count,
+  /// never wei-denominated (hence no `Wei` suffix, unlike the price fields
+  /// below) — under the same all-or-nothing conditions as [toAddressHex].
+  /// Set for every recognized transaction type (GitHub #48).
+  final BigInt? gasLimit;
+
+  /// The RLP-decoded `gasPrice` field, in wei per gas unit, under the same
+  /// all-or-nothing conditions as [toAddressHex]. Set for legacy and
+  /// EIP-2930 transactions; always `null` for EIP-1559, which uses
+  /// [maxFeePerGasWei]/[maxPriorityFeePerGasWei] instead (GitHub #48).
+  final BigInt? gasPriceWei;
+
+  /// The RLP-decoded `maxFeePerGas` field (EIP-1559), in wei per gas unit,
+  /// under the same all-or-nothing conditions as [toAddressHex]. `null` for
+  /// legacy/EIP-2930 transactions, which use [gasPriceWei] instead
+  /// (GitHub #48).
+  final BigInt? maxFeePerGasWei;
+
+  /// The RLP-decoded `maxPriorityFeePerGas` field (EIP-1559), in wei per
+  /// gas unit, under the same all-or-nothing conditions as [toAddressHex].
+  /// `null` for legacy/EIP-2930 transactions (GitHub #48).
+  final BigInt? maxPriorityFeePerGasWei;
+
   const SignRequest({
     this.requestId,
     required this.signData,
@@ -56,16 +88,31 @@ class SignRequest {
     this.toAddressHex,
     this.valueWei,
     this.dataHex,
+    this.nonceValue,
+    this.gasLimit,
+    this.gasPriceWei,
+    this.maxFeePerGasWei,
+    this.maxPriorityFeePerGasWei,
   });
 
-  /// True iff [toAddressHex], [valueWei] and [dataHex] ALL decoded — the
-  /// review screen renders the structured 4-card layout ONLY when this
-  /// holds; a partial decode is deliberately downgraded to the undecodable
-  /// fallback (GitHub #18) rather than shown as a complete-looking summary
-  /// with an "Unknown" card standing in for the field that failed. Derived,
-  /// never stored, so it can never drift from the fields it reports on.
+  /// True iff [toAddressHex], [valueWei], [dataHex], [nonceValue] and
+  /// [gasLimit] ALL decoded, AND exactly one complete gas-price model is
+  /// present — either [gasPriceWei] alone (legacy/EIP-2930), or both
+  /// [maxFeePerGasWei] and [maxPriorityFeePerGasWei] (EIP-1559). The review
+  /// screen renders the structured card layout (including the gas/network
+  /// fee card, GitHub #48) ONLY when this holds; a partial decode is
+  /// deliberately downgraded to the undecodable fallback (GitHub #18)
+  /// rather than shown as a complete-looking summary with an "Unknown" card
+  /// standing in for the field that failed. Derived, never stored, so it
+  /// can never drift from the fields it reports on.
   bool get hasDecodedSummary =>
-      toAddressHex != null && valueWei != null && dataHex != null;
+      toAddressHex != null &&
+      valueWei != null &&
+      dataHex != null &&
+      nonceValue != null &&
+      gasLimit != null &&
+      (gasPriceWei != null ||
+          (maxFeePerGasWei != null && maxPriorityFeePerGasWei != null));
 
   /// Builds a [SignRequest] from a decoded [EthSignRequest], attempting the
   /// RLP summary decode for [EthSignDataType.transaction] (legacy EIP-155
@@ -75,25 +122,34 @@ class SignRequest {
   /// MetaMask Extension's QR hardware-wallet flow actually sends for its
   /// default gas model) payloads only. A malformed/unparsable `signData`,
   /// or a typed-transaction type byte this vault doesn't recognize, never
-  /// throws here — [toAddressHex], [valueWei] and [dataHex] simply stay
-  /// `null`; the review screen falls back to showing only the fields that
-  /// did decode.
+  /// throws here — [toAddressHex], [valueWei], [dataHex] and the gas fields
+  /// simply stay `null`; the review screen falls back to showing only the
+  /// fields that did decode.
   ///
-  /// GitHub #18: `to`/`value`/`data` are decoded as a single atomic
-  /// outcome — either all three RLP items are well-formed [RlpBytes] and
-  /// all three summary fields are set, or none are. A single corrupted
-  /// field (e.g. a nested [RlpList] where [RlpBytes] was expected) must
-  /// never leave the other two fields set, which would let the review
-  /// screen render a complete-looking summary around tampered data.
+  /// GitHub #18 (widened by #48): `to`/`value`/`data`/`nonce`/`gasLimit`
+  /// and the active type's gas price field(s) are decoded as a single
+  /// atomic outcome — either every declared RLP item is a well-formed
+  /// [RlpBytes] and every summary field is set, or none are. A single
+  /// corrupted field (e.g. a nested [RlpList] where [RlpBytes] was
+  /// expected) must never leave the other fields set, which would let the
+  /// review screen render a complete-looking summary around tampered data.
   factory SignRequest.fromEthSignRequest(EthSignRequest request) {
     String? toAddressHex;
     BigInt? valueWei;
     String? dataHex;
+    BigInt? nonceValue;
+    BigInt? gasLimit;
+    BigInt? gasPriceWei;
+    BigInt? maxFeePerGasWei;
+    BigInt? maxPriorityFeePerGasWei;
 
     try {
       final _TxFieldLayout? layout = switch (request.dataType) {
         EthSignDataType.transaction => const _TxFieldLayout(
           rlpBytes: null, // legacy: the whole signData is the RLP list
+          nonceIndex: 0,
+          gasPriceIndex: 1,
+          gasLimitIndex: 2,
           toIndex: 3,
           valueIndex: 4,
           dataIndex: 5,
@@ -110,12 +166,46 @@ class SignRequest {
           final to = decoded.items[layout.toIndex];
           final value = decoded.items[layout.valueIndex];
           final data = decoded.items[layout.dataIndex];
-          // GitHub #18: one combined guard, not three independent ones —
-          // either all three fields decode, or none of them do.
-          if (to is RlpBytes && value is RlpBytes && data is RlpBytes) {
+          final nonce = decoded.items[layout.nonceIndex];
+          final gasLimitItem = decoded.items[layout.gasLimitIndex];
+          final gasPriceIdx = layout.gasPriceIndex;
+          final maxFeeIdx = layout.maxFeePerGasIndex;
+          final maxPriorityIdx = layout.maxPriorityFeePerGasIndex;
+          final gasPriceItem = gasPriceIdx == null
+              ? null
+              : decoded.items[gasPriceIdx];
+          final maxFeeItem = maxFeeIdx == null
+              ? null
+              : decoded.items[maxFeeIdx];
+          final maxPriorityItem = maxPriorityIdx == null
+              ? null
+              : decoded.items[maxPriorityIdx];
+          // GitHub #18/#48: one combined guard, not eight independent
+          // ones — either every declared field decodes, or none of them
+          // do. `null` here means "the layout does not declare this
+          // index", never "decode failed" — see _TxFieldLayout.
+          if (to is RlpBytes &&
+              value is RlpBytes &&
+              data is RlpBytes &&
+              nonce is RlpBytes &&
+              gasLimitItem is RlpBytes &&
+              (gasPriceItem == null || gasPriceItem is RlpBytes) &&
+              (maxFeeItem == null || maxFeeItem is RlpBytes) &&
+              (maxPriorityItem == null || maxPriorityItem is RlpBytes)) {
             toAddressHex = '0x${_toHex(to.data)}';
             valueWei = _bytesToBigInt(value.data);
             dataHex = '0x${_toHex(data.data)}';
+            nonceValue = _bytesToBigInt(nonce.data);
+            gasLimit = _bytesToBigInt(gasLimitItem.data);
+            gasPriceWei = gasPriceItem is RlpBytes
+                ? _bytesToBigInt(gasPriceItem.data)
+                : null;
+            maxFeePerGasWei = maxFeeItem is RlpBytes
+                ? _bytesToBigInt(maxFeeItem.data)
+                : null;
+            maxPriorityFeePerGasWei = maxPriorityItem is RlpBytes
+                ? _bytesToBigInt(maxPriorityItem.data)
+                : null;
           }
         }
       }
@@ -132,26 +222,46 @@ class SignRequest {
       toAddressHex: toAddressHex,
       valueWei: valueWei,
       dataHex: dataHex,
+      nonceValue: nonceValue,
+      gasLimit: gasLimit,
+      gasPriceWei: gasPriceWei,
+      maxFeePerGasWei: maxFeePerGasWei,
+      maxPriorityFeePerGasWei: maxPriorityFeePerGasWei,
     );
   }
 }
 
-/// Where `to`/`value`/`data` sit inside a transaction's RLP field list, and
-/// which bytes to RLP-decode to find that list.
+/// Where `to`/`value`/`data`/`nonce`/`gasLimit`/gas-price field(s) sit
+/// inside a transaction's RLP field list, and which bytes to RLP-decode to
+/// find that list. [nonceIndex]/[gasLimitIndex] are non-nullable — every
+/// recognized transaction type declares both. The gas price indices are
+/// nullable and mutually exclusive by design: legacy/EIP-2930 declare only
+/// [gasPriceIndex]; EIP-1559 declares only [maxFeePerGasIndex] and
+/// [maxPriorityFeePerGasIndex] (GitHub #48).
 class _TxFieldLayout {
   /// The bytes to feed to [rlpDecode] — `null` means "use `signData`
   /// as-is" (the legacy/[EthSignDataType.transaction] case, which has no
   /// leading type byte to strip).
   final Uint8List? rlpBytes;
+  final int nonceIndex;
   final int toIndex;
   final int valueIndex;
   final int dataIndex;
+  final int gasLimitIndex;
+  final int? gasPriceIndex;
+  final int? maxFeePerGasIndex;
+  final int? maxPriorityFeePerGasIndex;
 
   const _TxFieldLayout({
     required this.rlpBytes,
+    required this.nonceIndex,
     required this.toIndex,
     required this.valueIndex,
     required this.dataIndex,
+    required this.gasLimitIndex,
+    this.gasPriceIndex,
+    this.maxFeePerGasIndex,
+    this.maxPriorityFeePerGasIndex,
   });
 }
 
@@ -169,6 +279,9 @@ _TxFieldLayout? _typedTransactionLayout(Uint8List signData) {
     // EIP-2930: [chainId, nonce, gasPrice, gasLimit, to, value, data, accessList]
     0x01 => _TxFieldLayout(
       rlpBytes: rlpBytes,
+      nonceIndex: 1,
+      gasPriceIndex: 2,
+      gasLimitIndex: 3,
       toIndex: 4,
       valueIndex: 5,
       dataIndex: 6,
@@ -176,6 +289,10 @@ _TxFieldLayout? _typedTransactionLayout(Uint8List signData) {
     // EIP-1559: [chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, accessList]
     0x02 => _TxFieldLayout(
       rlpBytes: rlpBytes,
+      nonceIndex: 1,
+      maxPriorityFeePerGasIndex: 2,
+      maxFeePerGasIndex: 3,
+      gasLimitIndex: 4,
       toIndex: 5,
       valueIndex: 6,
       dataIndex: 7,
