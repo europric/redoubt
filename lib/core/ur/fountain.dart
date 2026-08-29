@@ -24,9 +24,10 @@ import 'xoshiro256.dart' show chooseFragmentIndexes;
 
 /// Thrown for malformed or inconsistent fountain input: a fragment that
 /// disagrees with previously-received parts, an oversized fragment, an
-/// invalid `seqNum`, or a reassembled message that fails its declared
-/// checksum. QR payloads are attacker-controllable, so this boundary never
-/// lets a decode problem surface as an uncaught exception.
+/// invalid `seqNum`, a declared `messageLength` outside the reassemblable
+/// range, or a reassembled message that fails its declared checksum. QR
+/// payloads are attacker-controllable, so this boundary never lets a
+/// decode problem surface as an uncaught exception.
 class FountainDecodeException implements Exception {
   final String message;
   FountainDecodeException(this.message);
@@ -164,9 +165,10 @@ class FountainDecoder {
   ///
   /// Throws [FountainDecodeException] if [part] disagrees with previously
   /// accepted parts (`seqLen`, `messageLength`, checksum, fragment
-  /// length), has an invalid `seqNum`, an oversized fragment, or if — once
-  /// every fragment is resolved — the reassembled message fails its
-  /// declared checksum.
+  /// length), has an invalid `seqNum`, an oversized fragment, a declared
+  /// `messageLength` outside the reassemblable range (`1..fragmentLength *
+  /// seqLen`), or if — once every fragment is resolved — the reassembled
+  /// message fails its declared checksum.
   void addPart(FountainPart part) {
     if (part.seqNum < 1) {
       throw FountainDecodeException('seqNum must be >= 1, got ${part.seqNum}');

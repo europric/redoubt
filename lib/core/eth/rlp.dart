@@ -14,8 +14,8 @@ library;
 import 'dart:typed_data';
 
 /// Thrown when [rlpDecode] is given malformed input: a length prefix that
-/// overruns the buffer, a non-canonical (non-minimal) length encoding, or
-/// trailing bytes after a complete top-level item.
+/// overruns the buffer, a long-form length-of-length greater than 7 bytes,
+/// or trailing bytes after a complete top-level item.
 class RlpDecodeException implements Exception {
   final String message;
   RlpDecodeException(this.message);
@@ -111,9 +111,10 @@ Uint8List _withLengthPrefix(int baseOffset, Uint8List payload) {
 /// Decodes a single, complete top-level RLP [item] from [data].
 ///
 /// Throws [RlpDecodeException] if [data] is empty, a length prefix overruns
-/// the buffer, or bytes remain after the first complete item — this
-/// boundary handles untrusted/attacker-controlled transaction bytes, so it
-/// never lets a decode problem surface as an uncaught exception type.
+/// the buffer, a long-form prefix declares more than 7 length bytes, or
+/// bytes remain after the first complete item — this boundary handles
+/// untrusted/attacker-controlled transaction bytes, so it never lets a
+/// decode problem surface as an uncaught exception type.
 RlpItem rlpDecode(Uint8List data) {
   if (data.isEmpty) {
     throw RlpDecodeException('empty input');
