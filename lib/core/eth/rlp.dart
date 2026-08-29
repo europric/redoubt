@@ -14,8 +14,8 @@ library;
 import 'dart:typed_data';
 
 /// Thrown when [rlpDecode] is given malformed input: a length prefix that
-/// overruns the buffer, a non-canonical (non-minimal) length encoding, or
-/// trailing bytes after a complete top-level item.
+/// overruns the buffer, a long-form length-of-length greater than 7 bytes,
+/// or trailing bytes after a complete top-level item.
 class RlpDecodeException implements Exception {
   final String message;
   RlpDecodeException(this.message);
@@ -111,9 +111,10 @@ Uint8List _withLengthPrefix(int baseOffset, Uint8List payload) {
 /// Decodes a single, complete top-level RLP [item] from [data].
 ///
 /// Throws [RlpDecodeException] if [data] is empty, a length prefix overruns
-/// the buffer, or bytes remain after the first complete item — this
-/// boundary handles untrusted/attacker-controlled transaction bytes, so it
-/// never lets a decode problem surface as an uncaught exception type.
+/// the buffer, a long-form prefix declares more than 7 length bytes, or
+/// bytes remain after the first complete item — this boundary handles
+/// untrusted/attacker-controlled transaction bytes, so it never lets a
+/// decode problem surface as an uncaught exception type.
 RlpItem rlpDecode(Uint8List data) {
   if (data.isEmpty) {
     throw RlpDecodeException('empty input');
@@ -151,12 +152,7 @@ _DecodeResult _decodeOne(Uint8List data, int offset) {
     );
   }
   if (prefix <= 0xbf) {
-    final lengthOfLength = prefix - 0xb7;
-    final lengthStart = offset + 1;
-    _checkBounds(data, lengthStart, lengthOfLength);
-    final length = _bytesToLength(data.sublist(lengthStart, lengthStart + lengthOfLength));
-    final start = lengthStart + lengthOfLength;
-    _checkBounds(data, start, length);
+    final (:start, :length) = _decodeLongFormLength(data, offset, 0xb7);
     return _DecodeResult(
       RlpBytes(data.sublist(start, start + length)),
       start + length,
@@ -171,12 +167,7 @@ _DecodeResult _decodeOne(Uint8List data, int offset) {
       start + length,
     );
   }
-  final lengthOfLength = prefix - 0xf7;
-  final lengthStart = offset + 1;
-  _checkBounds(data, lengthStart, lengthOfLength);
-  final length = _bytesToLength(data.sublist(lengthStart, lengthStart + lengthOfLength));
-  final start = lengthStart + lengthOfLength;
-  _checkBounds(data, start, length);
+  final (:start, :length) = _decodeLongFormLength(data, offset, 0xf7);
   return _DecodeResult(
     RlpList(_decodeItems(data, start, start + length)),
     start + length,
@@ -195,6 +186,34 @@ List<RlpItem> _decodeItems(Uint8List data, int start, int end) {
     offset = result.nextOffset;
   }
   return items;
+}
+
+/// Decodes a long-form length prefix (`lengthOfLength` byte(s) followed by
+/// the encoded length itself) shared by the byte-string (`longFormBase`
+/// `0xb7`) and list (`longFormBase` `0xf7`) branches of [_decodeOne].
+///
+/// Rejects any `lengthOfLength > 7` with [RlpDecodeException] BEFORE
+/// computing bounds or the length value itself — `lengthOfLength` bytes
+/// shifted through [_bytesToLength] can overflow a 64-bit int (producing a
+/// negative or wrapped value) for 8+ bytes, which would otherwise surface
+/// as an unhandled [RangeError] deeper in [_checkBounds]/`sublist`.
+({int start, int length}) _decodeLongFormLength(
+  Uint8List data,
+  int offset,
+  int longFormBase,
+) {
+  final lengthOfLength = data[offset] - longFormBase;
+  if (lengthOfLength > 7) {
+    throw RlpDecodeException(
+      'length-of-length too large ($lengthOfLength bytes, max 7)',
+    );
+  }
+  final lengthStart = offset + 1;
+  _checkBounds(data, lengthStart, lengthOfLength);
+  final length = _bytesToLength(data.sublist(lengthStart, lengthStart + lengthOfLength));
+  final start = lengthStart + lengthOfLength;
+  _checkBounds(data, start, length);
+  return (start: start, length: length);
 }
 
 void _checkBounds(Uint8List data, int start, int length) {
