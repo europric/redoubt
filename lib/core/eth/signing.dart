@@ -47,6 +47,12 @@ Uint8List keccak256(List<int> data) =>
 /// signature and which of the two candidate public keys is correct.
 ///
 /// Throws [ArgumentError] if [hash] is not exactly 32 bytes.
+///
+/// **GitHub #25**: `ETHSigner.fromKeyBytes` internally builds its own
+/// `ECDSAPrivateKey`/`secretMultiplier` (`final BigInt`) from [privateKey] —
+/// an independent, equally unzeroizable copy of the key, same root cause as
+/// `EthTransactionSigner.sign`'s `addressKey`. [privateKey] itself is the
+/// caller's zeroizable buffer and is unaffected by this.
 EcdsaSignature signHash(Uint8List privateKey, Uint8List hash) {
   if (hash.length != 32) {
     throw ArgumentError.value(hash.length, 'hash.length', 'must be 32 bytes');

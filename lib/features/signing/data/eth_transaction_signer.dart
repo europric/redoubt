@@ -189,6 +189,16 @@ class EthTransactionSigner implements TransactionSigner {
         throw const PassphraseMismatchFailure();
       }
 
+      // GitHub #25: `privateKeyBytes` (this method's own copy) IS zeroized
+      // below in `finally`. `addressKey`/`master`'s underlying
+      // `Bip32PrivateKey`/`ECDSAPrivateKey` are NOT — verified against
+      // `blockchain_utils` 7.1.0 source that `secretMultiplier` is a `final
+      // BigInt`, so `.raw` always returns a fresh computed copy, never a
+      // live mutable buffer; there is nothing in `addressKey` a
+      // `fillRange()`-style call could actually zero. Same accepted,
+      // documented residual limitation as `_addressLevelKey`'s derived key
+      // (see that method's doc comment) — tracked upstream, not fixable
+      // here.
       privateKeyBytes = Uint8List.fromList(addressKey.bip32.privateKey.raw);
 
       final signature = signHash(privateKeyBytes, hash);
