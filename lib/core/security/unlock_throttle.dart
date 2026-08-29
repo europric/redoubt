@@ -3,11 +3,11 @@
 /// "Exponential Backoff On Failed Attempts, Never Auto-Wipe" requirement;
 /// design.md's "UnlockThrottle design" decision).
 ///
-/// **Standalone in this PR**: no caller wires this class into
-/// `VaultCipher`/`VaultCommitService`/any unlock UI yet (that lands in
-/// PR7, gated on the Phase 9 device benchmark). This file only has to be
-/// correct in isolation -- its own state machine and persistence. A future
-/// caller would use it as:
+/// **Live at six call sites**: this class is wired into production and
+/// gates every app unlock and signing attempt --
+/// `lib/config/vault_scope.dart:105`, `lib/config/vault_wipe_service.dart:53`,
+/// `AppUnlockController`, `PinEntryPage`, `EthTransactionSigner`, and
+/// `VaultResetController`. A caller uses it as:
 /// ```dart
 /// final remaining = await throttle.remainingDelay();
 /// if (remaining > Duration.zero) { /* block submit, show countdown */ }
@@ -23,7 +23,7 @@
 ///   // for a structurally broken blob" (design.md's failure-classification
 ///   // decision) would call recordAttemptStart() only AFTER confirming the
 ///   // header parses with a known version, or would explicitly not treat
-///   // this branch as chargeable. Left to the PR7 caller.
+///   // this branch as chargeable.
 /// }
 /// ```
 ///
