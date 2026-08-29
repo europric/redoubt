@@ -177,15 +177,22 @@ class FountainDecoder {
       );
     }
     if (_seqLen == null) {
-      _seqLen = part.seqLen;
-      _messageLength = part.messageLength;
-      _checksum = part.checksum;
-      _fragmentLength = part.fragment.length;
       if (part.seqLen > maxReasonableSeqLen) {
         throw FountainDecodeException(
           'seqLen too large (${part.seqLen}) — max $maxReasonableSeqLen',
         );
       }
+      if (part.messageLength < 1 ||
+          part.messageLength > part.fragment.length * part.seqLen) {
+        throw FountainDecodeException(
+          'messageLength out of range (${part.messageLength}) — '
+          'must be 1..${part.fragment.length * part.seqLen}',
+        );
+      }
+      _seqLen = part.seqLen;
+      _messageLength = part.messageLength;
+      _checksum = part.checksum;
+      _fragmentLength = part.fragment.length;
       _fragments = List<Uint8List?>.filled(part.seqLen, null);
     } else {
       if (part.seqLen != _seqLen) {
