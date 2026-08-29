@@ -30,6 +30,13 @@ class SignRequest {
   /// uses — see `test/support/fixtures/bc_ur_registry_eth_fixtures.dart`).
   /// `null` for any other data type or an unparsable payload — this is a
   /// best-effort display aid, never a signing precondition.
+  ///
+  /// GitHub #18: [fromEthSignRequest] decodes this field, [valueWei] and
+  /// [dataHex] as a single all-or-nothing outcome — either all three are
+  /// non-null or all three are null, never a mix. See [hasDecodedSummary].
+  /// A hand-built [SignRequest] via the public `const` constructor below is
+  /// NOT covered by that guarantee (design.md D3) — [hasDecodedSummary]
+  /// reports the true per-instance state regardless of how it was built.
   final String? toAddressHex;
 
   /// The RLP-decoded `value` field, in wei, under the same conditions as
@@ -51,6 +58,15 @@ class SignRequest {
     this.dataHex,
   });
 
+  /// True iff [toAddressHex], [valueWei] and [dataHex] ALL decoded — the
+  /// review screen renders the structured 4-card layout ONLY when this
+  /// holds; a partial decode is deliberately downgraded to the undecodable
+  /// fallback (GitHub #18) rather than shown as a complete-looking summary
+  /// with an "Unknown" card standing in for the field that failed. Derived,
+  /// never stored, so it can never drift from the fields it reports on.
+  bool get hasDecodedSummary =>
+      toAddressHex != null && valueWei != null && dataHex != null;
+
   /// Builds a [SignRequest] from a decoded [EthSignRequest], attempting the
   /// RLP summary decode for [EthSignDataType.transaction] (legacy EIP-155
   /// RLP, `[nonce, gasPrice, gasLimit, to, value, data, ...]`) and
@@ -62,6 +78,13 @@ class SignRequest {
   /// throws here — [toAddressHex], [valueWei] and [dataHex] simply stay
   /// `null`; the review screen falls back to showing only the fields that
   /// did decode.
+  ///
+  /// GitHub #18: `to`/`value`/`data` are decoded as a single atomic
+  /// outcome — either all three RLP items are well-formed [RlpBytes] and
+  /// all three summary fields are set, or none are. A single corrupted
+  /// field (e.g. a nested [RlpList] where [RlpBytes] was expected) must
+  /// never leave the other two fields set, which would let the review
+  /// screen render a complete-looking summary around tampered data.
   factory SignRequest.fromEthSignRequest(EthSignRequest request) {
     String? toAddressHex;
     BigInt? valueWei;
@@ -87,9 +110,13 @@ class SignRequest {
           final to = decoded.items[layout.toIndex];
           final value = decoded.items[layout.valueIndex];
           final data = decoded.items[layout.dataIndex];
-          if (to is RlpBytes) toAddressHex = '0x${_toHex(to.data)}';
-          if (value is RlpBytes) valueWei = _bytesToBigInt(value.data);
-          if (data is RlpBytes) dataHex = '0x${_toHex(data.data)}';
+          // GitHub #18: one combined guard, not three independent ones —
+          // either all three fields decode, or none of them do.
+          if (to is RlpBytes && value is RlpBytes && data is RlpBytes) {
+            toAddressHex = '0x${_toHex(to.data)}';
+            valueWei = _bytesToBigInt(value.data);
+            dataHex = '0x${_toHex(data.data)}';
+          }
         }
       }
     } on RlpDecodeException {
