@@ -154,6 +154,17 @@ class SignReviewPage extends StatelessWidget {
                     _OriginCard(origin: request.origin),
                     const SizedBox(height: 16),
 
+                    // Expected-account disclosure (redoubt-multi-derivation)
+                    // — shown only when the scanned QR carried an explicit
+                    // derived address for the requested derivation path.
+                    // Checksummed via the same eip55 rule as _AddressCard.
+                    if (controller.expectedAddress != null)
+                      _ExpectedAddressCard(
+                        address: controller.expectedAddress!,
+                      ),
+                    if (controller.expectedAddress != null)
+                      const SizedBox(height: 16),
+
                     // Type-aware layout
                     if (isBlocked) ...[
                       const _BlockedRequestBody(),
@@ -1456,6 +1467,36 @@ class _ChainCard extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// redoubt-multi-derivation: Expected-Address Card
+// ═══════════════════════════════════════════════════════════════
+
+/// Displays the expected signing address from the scanned QR (present only
+/// when the QR carried an explicit derived address for its requested
+/// derivation path — redoubt-multi-derivation). Checksummed via eip55 rule
+/// and abbreviated for display, matching [_AddressCard]'s presentation.
+class _ExpectedAddressCard extends StatelessWidget {
+  const _ExpectedAddressCard({required this.address});
+
+  final String address;
+
+  @override
+  Widget build(BuildContext context) {
+    final checksummed = _checksummedAddressOrRaw(address);
+    return _TransactionReviewCard(
+      label: 'Expected Account',
+      copyValue: checksummed,
+      content: SelectableText(
+        abbreviateAddress(checksummed),
+        style: const TextStyle(
+          fontFamily: RedoubtTokens.monoFamily,
+          fontSize: 14,
+        ),
       ),
     );
   }

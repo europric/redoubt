@@ -79,6 +79,19 @@ class SignRequest {
   /// `null` for legacy/EIP-2930 transactions (GitHub #48).
   final BigInt? maxPriorityFeePerGasWei;
 
+  /// The derivation-path address index from the scanned QR's
+  /// `CryptoKeypath`, when it matches the standard Ethereum BIP-44 path
+  /// `m/44'/60'/0'/0/<X>`. `null` for legacy QR frames without a
+  /// derivation path or with a path this wallet does not recognise
+  /// (redoubt-multi-derivation).
+  final int? derivationPathIndex;
+
+  /// The expected signing address (20-byte, `0x`-prefixed hex) from the
+  /// scanned QR's `address` field, present when the QR included a
+  /// derivation path and explicit address for user verification
+  /// (redoubt-multi-derivation). `null` for legacy QR frames.
+  final String? expectedAddress;
+
   const SignRequest({
     this.requestId,
     required this.signData,
@@ -93,6 +106,8 @@ class SignRequest {
     this.gasPriceWei,
     this.maxFeePerGasWei,
     this.maxPriorityFeePerGasWei,
+    this.derivationPathIndex,
+    this.expectedAddress,
   });
 
   /// True iff [toAddressHex], [valueWei], [dataHex], [nonceValue] and
@@ -142,6 +157,15 @@ class SignRequest {
     BigInt? gasPriceWei;
     BigInt? maxFeePerGasWei;
     BigInt? maxPriorityFeePerGasWei;
+
+    // redoubt-multi-derivation: extract derivation path index and expected
+    // address from the scanned QR. If the path does not match the standard
+    // Ethereum BIP-44 path m/44'/60'/0'/0/<X>, addressIndex returns null
+    // and the signer falls back to the legacy index-0 flow.
+    final derivationPathIndex = request.derivationPath.addressIndex;
+    final expectedAddress = request.address != null
+        ? '0x${_toHex(request.address!)}'
+        : null;
 
     try {
       final _TxFieldLayout? layout = switch (request.dataType) {
@@ -227,6 +251,8 @@ class SignRequest {
       gasPriceWei: gasPriceWei,
       maxFeePerGasWei: maxFeePerGasWei,
       maxPriorityFeePerGasWei: maxPriorityFeePerGasWei,
+      derivationPathIndex: derivationPathIndex,
+      expectedAddress: expectedAddress,
     );
   }
 }

@@ -160,46 +160,82 @@ class EthTransactionSigner implements TransactionSigner {
       // whole change exists to prevent).
       final language = secret.requireLanguage();
 
-      final addressKey = await _addressLevelKey(
-        secret.entropy,
-        language: language,
-        passphraseUtf8: passphraseUtf8,
-      );
+      // ── redoubt-multi-derivation ───────────────────────────────
+      // When the scanned QR carries both a derivation-path index AND an
+      // expected address, use the dual-derive path that shares one PBKDF2
+      // call: derive at index 0 for the passphrase check (D5 guard), then
+      // at the target index for the expected-address match and signing.
+      // When either field is null, fall back to the legacy (index 0) path.
+      if (request.derivationPathIndex != null &&
+          request.expectedAddress != null) {
+        final targetIndex = request.derivationPathIndex!;
+        final expectedAddress = request.expectedAddress!;
 
-      // D5 — address-match guard, unconditional (runs whether or not a
-      // passphrase was supplied: the dangerous case is a passphrase-
-      // protected vault whose owner forgot to enable the toggle). Reuses
-      // the node just derived above — no second PBKDF2, only a public-key
-      // encode. Placed AFTER recordSuccess() (the PIN was correct — never
-      // charge the throttle for a passphrase typo) and BEFORE
-      // privateKeyBytes is materialized, so a mismatch never puts a
-      // wrong-key private scalar in memory.
-      final derivedAddress = EthAddrEncoder().encodeKey(
-        addressKey.bip32.publicKey.compressed,
-      );
-      final committed = await committedAddressSource.committedAddress();
-      // Null committed address: only block for framed vaults (post-cache)
-      // — a legacy vault never had a committed address, so blocking would
-      // lock out valid pre-change vaults. A framed vault whose cache is
-      // empty indicates a write failure that makes the passphrase check
-      // unreliable (see D5 ADR).
-      if (committed == null && secret.isFramed ||
-          committed != null &&
-              committed.toLowerCase() != derivedAddress.toLowerCase()) {
-        throw const PassphraseMismatchFailure();
+        // Single PBKDF2 — one seed for both derivations.
+        final seed = await _seedDeriver(
+          secret.entropy,
+          language: language,
+          passphraseUtf8: passphraseUtf8,
+        );
+        Uint8List? seedToZeroize = seed;
+        try {
+          final master = Bip44.fromSeed(seed, Bip44Coins.ethereum);
+
+          // Derive at index 0 first for passphrase check against the
+          // vault's committed address (D5 guard).
+          final addressKey0 = _deriveAtIndex(master, 0);
+          final derivedAddress0 = EthAddrEncoder().encodeKey(
+            addressKey0.bip32.publicKey.compressed,
+          );
+          final committed = await committedAddressSource.committedAddress();
+          if (committed == null && secret.isFramed ||
+              committed != null &&
+                  committed.toLowerCase() != derivedAddress0.toLowerCase()) {
+            throw const PassphraseMismatchFailure();
+          }
+
+          // Derive at the target index and compare against the expected
+          // address from the QR (multi-derivation verification).
+          final addressKeyTarget = _deriveAtIndex(master, targetIndex);
+          final derivedAddressTarget = EthAddrEncoder().encodeKey(
+            addressKeyTarget.bip32.publicKey.compressed,
+          );
+          if (derivedAddressTarget.toLowerCase() !=
+              expectedAddress.toLowerCase()) {
+            throw const PassphraseMismatchFailure();
+          }
+
+          privateKeyBytes = Uint8List.fromList(
+            addressKeyTarget.bip32.privateKey.raw,
+          );
+          seedToZeroize = null; // zeroized via finally below
+        } finally {
+          if (seedToZeroize != null) {
+            seedToZeroize.fillRange(0, seedToZeroize.length, 0);
+          }
+        }
+      } else {
+        // ── Legacy path (no derivation path / expected address) ──
+        final addressKey = await _addressLevelKey(
+          secret.entropy,
+          language: language,
+          passphraseUtf8: passphraseUtf8,
+        );
+
+        // D5 — address-match guard, unconditional. Reuses the node just
+        // derived above — no second PBKDF2, only a public-key encode.
+        final derivedAddress = EthAddrEncoder().encodeKey(
+          addressKey.bip32.publicKey.compressed,
+        );
+        final committed = await committedAddressSource.committedAddress();
+        if (committed == null && secret.isFramed ||
+            committed != null &&
+                committed.toLowerCase() != derivedAddress.toLowerCase()) {
+          throw const PassphraseMismatchFailure();
+        }
+
+        privateKeyBytes = Uint8List.fromList(addressKey.bip32.privateKey.raw);
       }
-
-      // GitHub #25: `privateKeyBytes` (this method's own copy) IS zeroized
-      // below in `finally`. `addressKey`/`master`'s underlying
-      // `Bip32PrivateKey`/`ECDSAPrivateKey` are NOT — verified against
-      // `blockchain_utils` 7.1.0 source that `secretMultiplier` is a `final
-      // BigInt`, so `.raw` always returns a fresh computed copy, never a
-      // live mutable buffer; there is nothing in `addressKey` a
-      // `fillRange()`-style call could actually zero. Same accepted,
-      // documented residual limitation as `_addressLevelKey`'s derived key
-      // (see that method's doc comment) — tracked upstream, not fixable
-      // here.
-      privateKeyBytes = Uint8List.fromList(addressKey.bip32.privateKey.raw);
 
       final signature = signHash(privateKeyBytes, hash);
       final chainId = request.chainId;
@@ -240,12 +276,11 @@ class EthTransactionSigner implements TransactionSigner {
     }
   }
 
-  /// `m/44'/60'/0'/0/0` — the single fixed signing account this vault ever
-  /// uses, matching `Bip32AccountDerivationService._addressLevelKey`
-  /// (`ethereum-account` spec's "Single Fixed-Path Derivation"). Whatever
-  /// derivation path a scanned `eth-sign-request` claims is intentionally
-  /// ignored — this vault only ever has one signing key, so honoring an
-  /// alternate requested path is not meaningful and not implemented.
+  /// `m/44'/60'/0'/0/<addressIndex>` — derives a BIP-44 address-level key
+  /// at the given [addressIndex] (default 0). Whatever derivation path a
+  /// scanned `eth-sign-request` claims is intentionally ignored for the
+  /// legacy (pre-multi-derivation) code path; the multi-derivation path uses
+  /// [_deriveAtIndex] instead to share one PBKDF2 call.
   ///
   /// [passphraseUtf8] is the optional BIP-39 passphrase ("25th word",
   /// seed-passphrase-25th-word design.md D1) — `null`/empty derives
@@ -267,6 +302,7 @@ class EthTransactionSigner implements TransactionSigner {
     Uint8List entropy, {
     required MnemonicLanguage language,
     Uint8List? passphraseUtf8,
+    int addressIndex = 0,
   }) async {
     final seed = await _seedDeriver(
       entropy,
@@ -278,10 +314,21 @@ class EthTransactionSigner implements TransactionSigner {
       return master.purpose.coin
           .account(0)
           .change(Bip44Changes.chainExt)
-          .addressIndex(0);
+          .addressIndex(addressIndex);
     } finally {
       seed.fillRange(0, seed.length, 0);
     }
+  }
+
+  /// Derives a BIP-44 address-level key at [addrIdx] from an already-created
+  /// [master] node — no second PBKDF2 call. Used by the multi-derivation
+  /// path (redoubt-multi-derivation) to share one seed derivation across
+  /// both the passphrase check (index 0) and the signing key (target index).
+  Bip44 _deriveAtIndex(Bip44 master, int addrIdx) {
+    return master.purpose.coin
+        .account(0)
+        .change(Bip44Changes.chainExt)
+        .addressIndex(addrIdx);
   }
 }
 
