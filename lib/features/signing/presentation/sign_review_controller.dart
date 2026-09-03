@@ -30,6 +30,12 @@ class SignReviewController extends ChangeNotifier {
   final SignRequest request;
   final TransactionSigner signer;
 
+  /// The expected signing address from the scanned QR, when the QR included
+  /// a derivation path and explicit address (redoubt-multi-derivation).
+  /// `null` for legacy QR frames. Forwarded from [SignRequest.expectedAddress]
+  /// for the review screen to display as an additional verification hint.
+  String? get expectedAddress => request.expectedAddress;
+
   AsyncState<SignedResult> _state = const AsyncIdle<SignedResult>();
   AsyncState<SignedResult> get state => _state;
 

@@ -141,4 +141,33 @@ class CryptoKeypath {
     }
     return CryptoKeypath.fromCborValue(value);
   }
+
+  /// The address-level index (the last component) for a standard Ethereum
+  /// BIP-44 path `m/44'/60'/0'/0/<addressIndex>`.
+  ///
+  /// Returns the index value (0..2^31) when [components] has exactly 5
+  /// entries matching [44', 60', 0', 0, X] (purpose, coin type, account,
+  /// change, address), and `null` for any other path — empty, partial,
+  /// wrong purpose/coin/account/change.
+  ///
+  /// Used by [EthTransactionSigner] to support multi-derivation signing
+  /// (redoubt-multi-derivation): a scanned QR can request a non-default
+  /// address index and the signer derives that specific key, not always
+  /// index 0.
+  int? get addressIndex {
+    if (components.length != 5) return null;
+    final p = components[0];
+    if (p.index != 44 || !p.hardened) return null;
+    final c = components[1];
+    if (c.index != 60 || !c.hardened) return null;
+    final a = components[2];
+    if (a.index != 0 || !a.hardened) return null;
+    final ch = components[3];
+    // change must be 0 (external chain), unhardened
+    if (ch.index != 0 || ch.hardened) return null;
+    final addr = components[4];
+    // address index must be non-wildcard, unhardened
+    if (addr.isWildcard || addr.hardened) return null;
+    return addr.index;
+  }
 }
