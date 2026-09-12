@@ -1,0 +1,67 @@
+name: Security finding
+description: Report a security weakness found in Redoubt
+title: "[Security]: "
+labels:
+  - bug
+body:
+  - type: input
+    id: finding_id
+    attributes:
+      label: Finding ID
+      description: Identifier from the originating security assessment, when available.
+      placeholder: vuln-0001
+    validations:
+      required: false
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: Highest demonstrated impact based on the available evidence.
+      options:
+        - Critical
+        - High
+        - Medium
+        - Low
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the weakness and the affected security boundary.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Provide verified source locations, runtime observations, or both.
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: State only demonstrated consequences and required attacker preconditions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide concise steps or a minimal payload that reproduces the weakness.
+    validations:
+      required: true
+
+  - type: textarea
+    id: remediation
+    attributes:
+      label: Proposed remediation
+      description: Describe a bounded fix and the regression evidence that should prove it.
+    validations:
+      required: true
